@@ -310,6 +310,72 @@ class HospitalSimulation:
             })
         
         return operations
+    
+    def simulate_external_transports(self) -> List[Dict]:
+        """
+        Simuliere externe Transporte (zur Apotheke, zur Therapie oder ins Heimatland/Heimatstadt).
+        
+        Returns:
+            Liste von Dictionaries mit Transport-Daten (from_location, to_location, priority, transport_type)
+        """
+        transports = []
+        
+        # Wahrscheinlichkeit: 35-45% Chance pro Zyklus, dass ein externer Transport erstellt wird
+        # Erhöht von 15% auf 40% für mehr Transporte
+        if random.random() < 0.40:
+            # Gewichtete Auswahl: Apotheke, Therapie und Heimatstadt haben ähnliche Wahrscheinlichkeiten
+            transport_type = random.choices(
+                ['pharmacy', 'therapy', 'home'],
+                weights=[0.35, 0.35, 0.30]  # 35% Apotheke, 35% Therapie, 30% Heimatstadt
+            )[0]
+            
+            # Abteilungen, von denen Patienten entlassen werden können
+            hospital_departments = [
+                "Notaufnahme", "Intensivstation", "Chirurgie", "Orthopädie", 
+                "Kardiologie", "Neurologie", "Innere Medizin", "Pädiatrie"
+            ]
+            from_location = random.choice(hospital_departments)
+            
+            if transport_type == 'pharmacy':
+                # Transport zur Apotheke
+                to_location = "Apotheke"
+                priority = random.choice(['medium', 'low'])  # Meist nicht dringend
+                estimated_time = random.randint(10, 25)  # 10-25 Minuten
+            elif transport_type == 'therapy':
+                # Transport zur Therapiestunde
+                therapy_locations = [
+                    "Physiotherapie", "Ergotherapie", "Logopädie", 
+                    "Psychotherapie", "Rehabilitation"
+                ]
+                to_location = random.choice(therapy_locations)
+                priority = random.choice(['medium', 'low'])  # Meist mittlere bis niedrige Priorität
+                estimated_time = random.randint(15, 35)  # 15-35 Minuten
+            else:  # home
+                # Transport ins Heimatland/Heimatstadt (oder zum Krankenhaus dort)
+                home_locations = [
+                    "Berlin", "München", "Hamburg", "Köln", "Frankfurt", 
+                    "Stuttgart", "Düsseldorf", "Dortmund", "Essen", "Leipzig",
+                    "Wien", "Zürich", "Amsterdam", "Prag", "Warschau",
+                    "Paris", "Brüssel", "Kopenhagen", "Stockholm", "Oslo"
+                ]
+                # Manchmal direkt zum Krankenhaus in der Heimatstadt
+                if random.random() < 0.4:  # 40% Chance zum Krankenhaus
+                    to_location = f"Krankenhaus {random.choice(home_locations)}"
+                else:
+                    to_location = random.choice(home_locations)
+                priority = random.choice(['low', 'medium'])  # Meist niedrige Priorität
+                estimated_time = random.randint(30, 120)  # 30-120 Minuten (längere Fahrt)
+            
+            transports.append({
+                'from_location': from_location,
+                'to_location': to_location,
+                'priority': priority,
+                'estimated_time_minutes': estimated_time,
+                'transport_type': transport_type,
+                'request_type': 'patient'
+            })
+        
+        return transports
 
 
 # Global simulation instance

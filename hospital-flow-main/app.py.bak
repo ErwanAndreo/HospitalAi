@@ -47,12 +47,12 @@ if 'rerun_disabled' not in st.session_state:
 # Styling anwenden
 apply_custom_styles()
 
+
 # Datenbank initialisieren (für Leistung gecacht)
-# Temporarily disabled cache to fix container code sync issues
-# @st.cache_resource
+@st.cache_resource
 def init_db():
-    from db import HospitalDB
-    return HospitalDB()
+        db_instance = HospitalDB()
+        return db_instance
 
 db = init_db()
 
@@ -206,26 +206,6 @@ if time_since_alert_generation > alert_generation_interval:
         # Fehler beim Update ignorieren (nicht kritisch)
         pass
 
-# Empfehlungen generieren (regelmäßig, z.B. alle 60-90 Sekunden)
-if 'last_recommendation_generation' not in st.session_state:
-    st.session_state.last_recommendation_generation = datetime.now(timezone.utc)
-
-time_since_recommendation_generation = (datetime.now(timezone.utc) - st.session_state.last_recommendation_generation).total_seconds()
-# Generiere Empfehlungen alle 60-90 Sekunden
-recommendation_generation_interval = 75
-if time_since_recommendation_generation > recommendation_generation_interval:
-    try:
-        # Hole aktuellen Simulationszustand
-        sim_metrics = sim.get_current_metrics()
-        sim_trends = sim.trends
-        
-        # Generiere Empfehlungen basierend auf aktuellen Daten
-        db.generate_recommendations(sim_metrics, sim_trends)
-        st.session_state.last_recommendation_generation = datetime.now(timezone.utc)
-    except Exception as e:
-        # Fehler beim Update ignorieren (nicht kritisch)
-        pass
-
 # Operationen-Simulation (regelmäßig, z.B. alle 5-10 Minuten)
 if 'last_operations_simulation' not in st.session_state:
     st.session_state.last_operations_simulation = datetime.now(timezone.utc)
@@ -347,29 +327,18 @@ if time_since_discharge_processing > discharge_processing_interval:
         
         if discharge_data:
             # Aggregiere alle entlassungsbereiten Patienten über alle Abteilungen
-            # Filtere ER-Abteilung aus (Notaufnahme-Patienten werden nicht automatisch entlassen)
             total_ready_for_discharge = sum([
                 dept.get('ready_for_discharge_count', 0) 
                 for dept in discharge_data
-                if dept.get('department', '').upper() not in ['ER', 'ED']  # Notaufnahme ausschließen
             ])
             
             # Führe Entlassungen durch (nicht alle auf einmal, sondern mit gewisser Wahrscheinlichkeit/Teilmenge)
             # Realistisch: Nicht alle entlassungsbereiten Patienten werden sofort entlassen
             # Verwendet eine gewisse Rate (z.B. 30-70% der entlassungsbereiten Patienten pro Zyklus)
             if total_ready_for_discharge > 0:
-                # Hole aktuelle lokale Zeit für zeitbasierte Entlassungsrate
-                current_local_time = get_local_time()
-                current_hour = current_local_time.hour
-                
-                # Nach 19:00 Uhr: sehr seltene Entlassungen (5-10% Rate)
-                if current_hour >= 19:
-                    discharge_rate = random.uniform(0.05, 0.10)  # 5-10% statt 40-60%
-                else:
-                    discharge_rate = random.uniform(0.4, 0.6)  # Normale Rate
-                
                 # Berechne Anzahl zu entlassender Patienten
-                # Basis: Entlassungsrate der entlassungsbereiten Patienten, aber mindestens 1 wenn > 0
+                # Basis: 40-60% der entlassungsbereiten Patienten, aber mindestens 1 wenn > 0
+                discharge_rate = random.uniform(0.4, 0.6)
                 patients_to_discharge = max(1, int(total_ready_for_discharge * discharge_rate))
                 
                 # Führe Entlassungen in der Simulation durch

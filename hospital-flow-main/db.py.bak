@@ -261,28 +261,6 @@ class HospitalDB:
         except Exception as e:
             pass
         
-        # Migriere device_maintenance Tabelle für Wartungsplanung
-        try:
-            cursor.execute("PRAGMA table_info(device_maintenance)")
-            columns = cursor.fetchall()
-            column_names = [col[1] for col in columns]
-            
-            # Add new columns for maintenance scheduling
-            if 'scheduled_maintenance_time' not in column_names:
-                cursor.execute("ALTER TABLE device_maintenance ADD COLUMN scheduled_maintenance_time DATETIME")
-            if 'maintenance_duration_minutes' not in column_names:
-                cursor.execute("ALTER TABLE device_maintenance ADD COLUMN maintenance_duration_minutes INTEGER")
-            if 'maintenance_confirmed' not in column_names:
-                cursor.execute("ALTER TABLE device_maintenance ADD COLUMN maintenance_confirmed BOOLEAN DEFAULT 0")
-            if 'maintenance_confirmed_by' not in column_names:
-                cursor.execute("ALTER TABLE device_maintenance ADD COLUMN maintenance_confirmed_by TEXT")
-            if 'maintenance_confirmed_at' not in column_names:
-                cursor.execute("ALTER TABLE device_maintenance ADD COLUMN maintenance_confirmed_at DATETIME")
-            
-            conn.commit()
-        except Exception as e:
-            pass
-        
         # Entlassungsplanung (aggregiert)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS discharge_planning (
@@ -543,9 +521,51 @@ class HospitalDB:
         # Hardcodierte Test-Alerts wurden entfernt, da der Algorithmus die Warnungen
         # basierend auf aktuellen Daten aus allen Tabs automatisch erstellt
         
-        # Empfehlungen werden jetzt dynamisch durch generate_recommendations() generiert
-        # Hardcodierte Test-Empfehlungen wurden entfernt, da der Algorithmus die Empfehlungen
-        # basierend auf aktuellen Kapazitäts- und Personal-Daten automatisch erstellt
+        # Empfehlungen mit neuem Template-Format einfügen
+        recs_data = [
+            (
+                "capacity", 
+                "Erwägen Sie das Öffnen von Überlaufbetten",
+                "Intensivstation-Auslastung hoch. Öffnen Sie 2 Überlaufbetten.",
+                "hoch",
+                "Intensivstation",
+                "Öffnen Sie vorübergehend 2 Überlaufbetten im Intensivbereich.",
+                "Intensivstation-Kapazität bei 94% mit steigendem Trend. Aktuelle Belegung: 17/18 Betten.",
+                "Wartezeiten um 15-20 Minuten reduzieren. Kapazitätsüberlauf in den nächsten 30 Minuten verhindern.",
+                "Überprüfen Sie die Ausrüstungsbereitschaft der Überlaufbetten. Bestätigen Sie die Verfügbarkeit des Personals für zusätzliche Betten.",
+                "hoch"
+            ),
+            (
+                "staffing",
+                "Pflegekraft in die Chirurgie umsetzen",
+                "Chirurgie-Belastung steigt. Versetzen Sie 1 Pflegekraft von der Urologie.",
+                "mittel",
+                "Chirurgie",
+                "Versetzen Sie vorübergehend 1 Mitarbeiter von der Urologie für 30 Minuten in die Chirurgie.",
+                "Chirurgie-Belastung steigt + Operationsplan nimmt zu. Aktuelle Auslastung: 42/45 Betten.",
+                "Voraussichtliche Entlastung in 15 Minuten. Operationsablauf optimieren.",
+                "Menschliche Kontrolle: Verfügbarkeit vor Umsetzung prüfen. Urologie Abdeckung sicherstellen.",
+                "mittel"
+            ),
+            (
+                "inventory",
+                "Zusätzliche Vorräte bestellen",
+                "Sauerstoffflaschenbestand bei 18%. Bestellen Sie 25 Einheiten.",
+                "hoch",
+                "Intensivstation",
+                "Bestellen Sie sofort 25 Sauerstoffflaschen für die Intensivstation.",
+                "Sauerstoffflaschenbestand bei 18% (9/50 Einheiten). Verbrauchsrate zeigt Engpassrisiko in 4-6 Stunden.",
+                "Versorgungsengpass verhindern. Kontinuierliche Patientenversorgung sicherstellen.",
+                "Lieferantenverfügbarkeit und Lieferzeit prüfen. Notfall-Lieferanten ggf. berücksichtigen.",
+                "hoch"
+            ),
+        ]
+        for rec in recs_data:
+            rec_type, title, description, priority, department, action, reason, expected_impact, safety_note, explanation_score = rec
+            cursor.execute("""
+                INSERT INTO recommendations (timestamp, rec_type, title, description, priority, department, status, action, reason, expected_impact, safety_note, explanation_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (now - timedelta(minutes=random.randint(10, 180)), rec_type, title, description, priority, department, "pending", action, reason, expected_impact, safety_note, explanation_score))
         
         # Inventar einfügen - Erweiterte Materialdatenbank mit realistischen Materialien
         inventory_items = [
@@ -1248,27 +1268,18 @@ class HospitalDB:
     
     def get_active_alerts(self) -> List[Dict]:
         """Hole nicht bestätigte Warnungen"""
-        conn = None
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM alerts
-                WHERE resolved = 0
-                ORDER BY 
-                    CASE severity WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
-                    timestamp DESC
-            """)
-            rows = cursor.fetchall()
-            return [dict(zip([col[0] for col in cursor.description], row)) for row in rows]
-        except Exception as e:
-            print(f"ERROR [get_active_alerts]: {type(e).__name__}: {str(e)}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
-            return []
-        finally:
-            if conn:
-                conn.close()
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM alerts
+            WHERE resolved = 0
+            ORDER BY 
+                CASE severity WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
+                timestamp DESC
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(zip([col[0] for col in cursor.description], row)) for row in rows]
     
     def get_alerts_by_time_range(self, hours: int = 24) -> List[Dict]:
         """Hole Warnungen innerhalb des Zeitraums"""
@@ -1288,27 +1299,18 @@ class HospitalDB:
     
     def get_pending_recommendations(self) -> List[Dict]:
         """Hole ausstehende Empfehlungen"""
-        conn = None
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM recommendations
-                WHERE status = 'pending'
-                ORDER BY 
-                    CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
-                    timestamp DESC
-            """)
-            rows = cursor.fetchall()
-            return [dict(zip([col[0] for col in cursor.description], row)) for row in rows]
-        except Exception as e:
-            print(f"ERROR [get_pending_recommendations]: {type(e).__name__}: {str(e)}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
-            return []
-        finally:
-            if conn:
-                conn.close()
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM recommendations
+            WHERE status = 'pending'
+            ORDER BY 
+                CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
+                timestamp DESC
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(zip([col[0] for col in cursor.description], row)) for row in rows]
     
     def get_recommendations_by_role(self, role: str = "all") -> List[Dict]:
         """Hole Empfehlungen gefiltert nach Rolle (all, nurse, doctor, manager)"""
@@ -1448,14 +1450,13 @@ class HospitalDB:
             sim_metrics: Aktuelle Simulationsmetriken (optional)
             sim_trends: Trends aus Simulation (optional)
         """
-        try:
-            from utils import (
-                calculate_capacity_status, calculate_inventory_status,
-                get_metric_severity_for_load, get_metric_severity_for_count, 
-                get_metric_severity_for_free
-            )
-            
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+        from utils import (
+            calculate_capacity_status, calculate_inventory_status,
+            get_metric_severity_for_load, get_metric_severity_for_count, 
+            get_metric_severity_for_free
+        )
+        
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         
         # 1. Kapazitätsstatus überwachen
         capacity = self.get_capacity_from_simulation(sim_metrics) if sim_metrics else self.get_capacity_overview()
@@ -1673,315 +1674,100 @@ class HospitalDB:
                     f"Mehrere kritische Metriken gleichzeitig aktiv ({critical_count} Bereiche)",
                     None
                 )
-        except Exception as e:
-            print(f"ERROR [generate_alerts]: {type(e).__name__}: {str(e)}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
-    
-    def _recommendation_exists(self, rec_type: str, title: str, department: Optional[str] = None, 
-                              hours: int = 4) -> bool:
-        """Prüfe ob eine ähnliche Empfehlung bereits existiert (innerhalb der letzten N Stunden)"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cutoff_time = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
-        
-        query = """
-            SELECT COUNT(*) FROM recommendations
-            WHERE rec_type = ? AND title = ? AND status = 'pending'
-            AND timestamp >= ?
-        """
-        params = [rec_type, title, cutoff_time]
-        
-        if department:
-            query += " AND department = ?"
-            params.append(department)
-        
-        cursor.execute(query, params)
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count > 0
-    
-    def _create_recommendation(self, rec_type: str, title: str, description: str, priority: str,
-                              department: Optional[str] = None, action: Optional[str] = None,
-                              reason: Optional[str] = None, expected_impact: Optional[str] = None,
-                              safety_note: Optional[str] = None, explanation_score: str = 'medium'):
-        """Erstelle eine Empfehlung in der Datenbank, wenn sie noch nicht existiert"""
-        # Normalisiere Priority zu englischen Werten
-        priority_map = {
-            'hoch': 'high',
-            'mittel': 'medium',
-            'niedrig': 'low',
-            'high': 'high',
-            'medium': 'medium',
-            'low': 'low'
-        }
-        normalized_priority = priority_map.get(priority.lower(), 'medium')
-        
-        if not self._recommendation_exists(rec_type, title, department):
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO recommendations (timestamp, rec_type, title, description, priority, department, 
-                                            status, action, reason, expected_impact, safety_note, explanation_score)
-                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
-            """, (
-                datetime.now(timezone.utc).replace(tzinfo=None),
-                rec_type,
-                title,
-                description,
-                normalized_priority,
-                department,
-                action,
-                reason,
-                expected_impact,
-                safety_note,
-                explanation_score
-            ))
-            conn.commit()
-            conn.close()
-    
-    def generate_recommendations(self, sim_metrics: Optional[Dict] = None, sim_trends: Optional[Dict] = None):
-        """
-        Generiere Empfehlungen basierend auf aktuellen Kapazitäts- und Personal-Daten.
-        
-        Args:
-            sim_metrics: Aktuelle Simulationsmetriken (optional)
-            sim_trends: Trends aus Simulation (optional)
-        """
-        try:
-            from utils import (
-                calculate_capacity_status, get_metric_severity_for_load
-            )
-            
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
-        
-        # 1. Kapazitäts-Empfehlungen
-        capacity = self.get_capacity_from_simulation(sim_metrics) if sim_metrics else self.get_capacity_overview()
-        for cap in capacity:
-            utilization = cap['utilization_rate']
-            dept = cap.get('department', 'N/A')
-            occupied_beds = cap.get('occupied_beds', 0)
-            total_beds = cap.get('total_beds', 0)
-            free_beds = total_beds - occupied_beds
-            
-            # Berechne benötigte Überlaufbetten
-            if utilization >= 90:
-                # Kritisch: Berechne wie viele Betten benötigt werden
-                # Ziel: auf 80% Auslastung reduzieren
-                target_utilization = 80
-                needed_beds = max(1, int((occupied_beds / target_utilization * 100) - total_beds))
-                
-                if needed_beds > 0 and not self._recommendation_exists('capacity', f"Öffnen Sie {needed_beds} Überlaufbetten", dept):
-                    self._create_recommendation(
-                        rec_type='capacity',
-                        title=f"Öffnen Sie {needed_beds} Überlaufbetten",
-                        description=f"{dept}-Kapazität bei {utilization:.0f}%. Öffnen Sie {needed_beds} Überlaufbetten.",
-                        priority='high',
-                        department=dept,
-                        action=f"Öffnen Sie vorübergehend {needed_beds} Überlaufbetten im {dept}-Bereich.",
-                        reason=f"{dept}-Kapazität bei {utilization:.0f}% mit steigendem Trend. Aktuelle Belegung: {occupied_beds}/{total_beds} Betten.",
-                        expected_impact=f"Wartezeiten um 15-20 Minuten reduzieren. Kapazitätsüberlauf in den nächsten 30 Minuten verhindern.",
-                        safety_note=f"Überprüfen Sie die Ausrüstungsbereitschaft der Überlaufbetten. Bestätigen Sie die Verfügbarkeit des Personals für zusätzliche Betten.",
-                        explanation_score='high'
-                    )
-            
-            elif utilization >= 85:
-                # Hoch: Erwäge Überlaufbetten
-                if not self._recommendation_exists('capacity', "Erwägen Sie das Öffnen von Überlaufbetten", dept):
-                    self._create_recommendation(
-                        rec_type='capacity',
-                        title="Erwägen Sie das Öffnen von Überlaufbetten",
-                        description=f"{dept}-Auslastung hoch. Öffnen Sie 2 Überlaufbetten.",
-                        priority='medium',
-                        department=dept,
-                        action=f"Öffnen Sie vorübergehend 2 Überlaufbetten im {dept}-Bereich.",
-                        reason=f"{dept}-Kapazität bei {utilization:.0f}% mit steigendem Trend. Aktuelle Belegung: {occupied_beds}/{total_beds} Betten.",
-                        expected_impact=f"Wartezeiten um 10-15 Minuten reduzieren. Kapazitätsüberlauf in den nächsten 45 Minuten verhindern.",
-                        safety_note=f"Überprüfen Sie die Ausrüstungsbereitschaft der Überlaufbetten. Bestätigen Sie die Verfügbarkeit des Personals für zusätzliche Betten.",
-                        explanation_score='medium'
-                    )
-        
-        # 2. Personal-Empfehlungen
-        if sim_metrics:
-            staff_load = sim_metrics.get('staff_load', 0)
-            
-            # Finde Abteilungen mit hoher Personalauslastung
-            if staff_load >= 80:
-                # Finde Abteilungen mit niedrigerer Auslastung als Quelle
-                capacity = self.get_capacity_from_simulation(sim_metrics) if sim_metrics else self.get_capacity_overview()
-                
-                # Sortiere Abteilungen nach Auslastung
-                sorted_capacity = sorted(capacity, key=lambda x: x.get('utilization_rate', 0), reverse=True)
-                
-                if len(sorted_capacity) >= 2:
-                    high_load_dept = sorted_capacity[0]
-                    low_load_dept = sorted_capacity[-1]
-                    
-                    high_util = high_load_dept.get('utilization_rate', 0)
-                    low_util = low_load_dept.get('utilization_rate', 0)
-                    
-                    # Nur Empfehlung erstellen, wenn signifikanter Unterschied besteht
-                    if high_util >= 85 and low_util < 70:
-                        high_dept_name = high_load_dept.get('department', 'N/A')
-                        low_dept_name = low_load_dept.get('department', 'N/A')
-                        
-                        if high_dept_name != low_dept_name and not self._recommendation_exists(
-                            'staffing', 
-                            f"Pflegekraft in die {high_dept_name} umsetzen",
-                            high_dept_name
-                        ):
-                            self._create_recommendation(
-                                rec_type='staffing',
-                                title=f"Pflegekraft in die {high_dept_name} umsetzen",
-                                description=f"{high_dept_name}-Belastung steigt. Versetzen Sie 1 Pflegekraft von der {low_dept_name}.",
-                                priority='medium' if high_util < 90 else 'high',
-                                department=high_dept_name,
-                                action=f"Versetzen Sie vorübergehend 1 Mitarbeiter von der {low_dept_name} für 30 Minuten in die {high_dept_name}.",
-                                reason=f"{high_dept_name}-Belastung steigt + Operationsplan nimmt zu. Aktuelle Auslastung: {high_util:.0f}%.",
-                                expected_impact=f"Voraussichtliche Entlastung in 15 Minuten. Operationsablauf optimieren.",
-                                safety_note=f"Menschliche Kontrolle: Verfügbarkeit vor Umsetzung prüfen. {low_dept_name} Abdeckung sicherstellen.",
-                                explanation_score='medium'
-                            )
-            
-            # Zusätzliche Personal-Empfehlung basierend auf ED Load und Waiting Count
-            ed_load = sim_metrics.get('ed_load', 0)
-            waiting_count = int(sim_metrics.get('waiting_count', 0))
-            
-            if ed_load >= 85 and waiting_count >= 10:
-                if not self._recommendation_exists('staffing', "Zusätzliches Personal in die Notaufnahme versetzen", 'ER'):
-                    self._create_recommendation(
-                        rec_type='staffing',
-                        title="Zusätzliches Personal in die Notaufnahme versetzen",
-                        description=f"Notaufnahme-Auslastung bei {ed_load:.0f}% mit {waiting_count} wartenden Patienten.",
-                        priority='high',
-                        department='ER',
-                        action="Versetzen Sie 1-2 zusätzliche Mitarbeiter in die Notaufnahme für die nächste Stunde.",
-                        reason=f"Notaufnahme-Auslastung bei {ed_load:.0f}% mit {waiting_count} wartenden Patienten. Wartezeiten steigen.",
-                        expected_impact=f"Wartezeiten um 20-30% reduzieren. Patientenversorgung beschleunigen.",
-                        safety_note="Verfügbarkeit von Personal in anderen Abteilungen prüfen. Mindestabdeckung sicherstellen.",
-                        explanation_score='high'
-                    )
-        except Exception as e:
-            print(f"ERROR [generate_recommendations]: {type(e).__name__}: {str(e)}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
     
     def get_transport_requests(self, status: Optional[str] = None) -> List[Dict]:
         """Hole Transportanfragen"""
-        conn = None
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            if status:
-                cursor.execute("""
-                    SELECT * FROM transport
-                    WHERE status = ?
-                    ORDER BY 
-                        CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
-                        timestamp DESC
-                """, (status,))
-            else:
-                cursor.execute("""
-                    SELECT * FROM transport
-                    ORDER BY 
-                        CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
-                        timestamp DESC
-                """)
-            rows = cursor.fetchall()
-            return [dict(zip([col[0] for col in cursor.description], row)) for row in rows]
-        except Exception as e:
-            print(f"ERROR [get_transport_requests]: {type(e).__name__}: {str(e)}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
-            return []
-        finally:
-            if conn:
-                conn.close()
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        if status:
+            cursor.execute("""
+                SELECT * FROM transport
+                WHERE status = ?
+                ORDER BY 
+                    CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
+                    timestamp DESC
+            """, (status,))
+        else:
+            cursor.execute("""
+                SELECT * FROM transport
+                ORDER BY 
+                    CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
+                    timestamp DESC
+            """)
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(zip([col[0] for col in cursor.description], row)) for row in rows]
     
     def create_inventory_order(self, item_id: int, quantity: int, department: Optional[str] = None) -> Dict:
         """Erstellt eine Inventar-Bestellung und zugehörige Transportanfrage"""
-        if quantity <= 0:
-            raise ValueError(f"Bestellmenge muss größer als 0 sein, erhalten: {quantity}")
+        conn = self.get_connection()
+        cursor = conn.cursor()
         
-        conn = None
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            
-            # Hole Item-Details
-            cursor.execute("SELECT item_name, department FROM inventory WHERE id = ?", (item_id,))
-            item_result = cursor.fetchone()
-            if not item_result:
-                raise ValueError(f"Item mit ID {item_id} nicht gefunden")
-            
-            item_name, item_dept = item_result
-            dept = department or item_dept
-            
-            # Erstelle Bestellung
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
-            cursor.execute("""
-                INSERT INTO inventory_orders (timestamp, item_id, item_name, quantity, department, status)
-                VALUES (?, ?, ?, ?, ?, 'ordered')
-            """, (now, item_id, item_name, quantity, dept))
-            order_id = cursor.lastrowid
-            
-            # Bestimme Priorität basierend auf aktuellen Bestand
-            cursor.execute("SELECT current_stock, min_threshold FROM inventory WHERE id = ?", (item_id,))
-            stock_result = cursor.fetchone()
-            if stock_result:
-                current_stock, min_threshold = stock_result
-                if current_stock < min_threshold:
-                    priority = 'high'
-                elif current_stock < min_threshold * 1.5:
-                    priority = 'medium'
-                else:
-                    priority = 'low'
-            else:
+        # Hole Item-Details
+        cursor.execute("SELECT item_name, department FROM inventory WHERE id = ?", (item_id,))
+        item_result = cursor.fetchone()
+        if not item_result:
+            conn.close()
+            raise ValueError(f"Item mit ID {item_id} nicht gefunden")
+        
+        item_name, item_dept = item_result
+        dept = department or item_dept
+        
+        # Erstelle Bestellung
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        cursor.execute("""
+            INSERT INTO inventory_orders (timestamp, item_id, item_name, quantity, department, status)
+            VALUES (?, ?, ?, ?, ?, 'ordered')
+        """, (now, item_id, item_name, quantity, dept))
+        order_id = cursor.lastrowid
+        
+        # Bestimme Priorität basierend auf aktuellen Bestand
+        cursor.execute("SELECT current_stock, min_threshold FROM inventory WHERE id = ?", (item_id,))
+        stock_result = cursor.fetchone()
+        if stock_result:
+            current_stock, min_threshold = stock_result
+            if current_stock < min_threshold:
+                priority = 'high'
+            elif current_stock < min_threshold * 1.5:
                 priority = 'medium'
-            
-            # Erstelle Transportanfrage (von Extern zum Hauptlager)
-            # Alle Bestellungen gehen zuerst ins Hauptlager, von dort werden sie dann an die Abteilungen verteilt
-            from_location = "Extern"
-            to_location = "Hauptlager"
-            
-            # Geschätzte Zeit: 10-30 Minuten für Inventar-Transporte
-            estimated_time = random.randint(10, 30)
-            
-            # Geplante Startzeit: 5-30 Minuten in der Zukunft
-            planned_start_time = now + timedelta(minutes=random.randint(5, 30))
-            
-            cursor.execute("""
-                INSERT INTO transport (timestamp, request_type, from_location, to_location, priority, status, 
-                                     estimated_time_minutes, related_entity_type, related_entity_id, planned_start_time)
-                VALUES (?, 'equipment', ?, ?, ?, 'pending', ?, 'inventory_order', ?, ?)
-            """, (now, from_location, to_location, priority, estimated_time, order_id, planned_start_time))
-            transport_id = cursor.lastrowid
-            
-            # Verknüpfe Bestellung mit Transport
-            cursor.execute("""
-                UPDATE inventory_orders SET transport_id = ? WHERE id = ?
-            """, (transport_id, order_id))
-            
-            conn.commit()
-            
-            return {
-                'order_id': order_id,
-                'transport_id': transport_id,
-                'item_name': item_name,
-                'quantity': quantity,
-                'department': dept,
-                'status': 'ordered'
-            }
-        except Exception as e:
-            if conn:
-                conn.rollback()
-            print(f"ERROR [create_inventory_order]: {type(e).__name__}: {str(e)}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
-            raise
-        finally:
-            if conn:
-                conn.close()
+            else:
+                priority = 'low'
+        else:
+            priority = 'medium'
+        
+        # Erstelle Transportanfrage (von Lager zu Abteilung)
+        from_location = "Lager"
+        to_location = dept or "Zentrallager"
+        
+        # Geschätzte Zeit: 10-30 Minuten für Inventar-Transporte
+        estimated_time = random.randint(10, 30)
+        
+        # Geplante Startzeit: 5-30 Minuten in der Zukunft
+        planned_start_time = now + timedelta(minutes=random.randint(5, 30))
+        
+        cursor.execute("""
+            INSERT INTO transport (timestamp, request_type, from_location, to_location, priority, status, 
+                                 estimated_time_minutes, related_entity_type, related_entity_id, planned_start_time)
+            VALUES (?, 'equipment', ?, ?, ?, 'pending', ?, 'inventory_order', ?, ?)
+        """, (now, from_location, to_location, priority, estimated_time, order_id, planned_start_time))
+        transport_id = cursor.lastrowid
+        
+        # Verknüpfe Bestellung mit Transport
+        cursor.execute("""
+            UPDATE inventory_orders SET transport_id = ? WHERE id = ?
+        """, (transport_id, order_id))
+        
+        conn.commit()
+        conn.close()
+        
+        return {
+            'order_id': order_id,
+            'transport_id': transport_id,
+            'item_name': item_name,
+            'quantity': quantity,
+            'department': dept,
+            'status': 'ordered'
+        }
     
     def create_patient_transport(self, from_location: str, to_location: str, priority: str = 'medium') -> int:
         """Erstellt eine Transportanfrage für Patiententransfer"""
@@ -2285,253 +2071,6 @@ class HospitalDB:
         rows = cursor.fetchall()
         conn.close()
         return [dict(zip([col[0] for col in cursor.description], row)) for row in rows]
-    
-    def get_patient_predictions_for_window(self, department: str, start_time: datetime, end_time: datetime) -> List[Dict]:
-        """
-        Hole Patientenvorhersagen für eine Abteilung in einem Zeitfenster
-        
-        Args:
-            department: Abteilung
-            start_time: Startzeit des Zeitfensters
-            end_time: Endzeit des Zeitfensters
-            
-        Returns:
-            Liste von Vorhersagen, die in das Zeitfenster fallen
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT * FROM predictions
-            WHERE department = ? 
-            AND prediction_type = 'patient_arrival'
-            AND timestamp >= ? 
-            AND timestamp <= ?
-            ORDER BY timestamp ASC
-        """, (department, start_time, end_time))
-        rows = cursor.fetchall()
-        conn.close()
-        return [dict(zip([col[0] for col in cursor.description], row)) for row in rows]
-    
-    def suggest_optimal_maintenance_times(self, device_id: str, max_suggestions: int = 5) -> List[Dict]:
-        """
-        Schlägt optimale Wartungszeiten für ein Gerät vor
-        
-        Args:
-            device_id: ID des Geräts
-            max_suggestions: Maximale Anzahl von Vorschlägen (Standard: 5)
-            
-        Returns:
-            Liste von vorgeschlagenen Zeitfenstern mit Score
-        """
-        from utils import suggest_maintenance_times
-        
-        # Hole Gerätedaten
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT * FROM device_maintenance
-            WHERE device_id = ?
-        """, (device_id,))
-        row = cursor.fetchone()
-        conn.close()
-        
-        if not row:
-            return []
-        
-        device = dict(zip([col[0] for col in cursor.description], row))
-        
-        # Hole alle relevanten Patientenvorhersagen
-        # Hole Vorhersagen für die nächsten 30 Tage
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        future = now + timedelta(days=30)
-        
-        department = device.get('department', '')
-        predictions = self.get_patient_predictions_for_window(department, now, future)
-        
-        # Falls keine Vorhersagen vorhanden, hole alle Vorhersagen der Abteilung
-        if not predictions:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM predictions
-                WHERE department = ? 
-                AND prediction_type = 'patient_arrival'
-                AND timestamp >= ?
-                ORDER BY timestamp ASC
-                LIMIT 100
-            """, (department, now))
-            rows = cursor.fetchall()
-            conn.close()
-            predictions = [dict(zip([col[0] for col in cursor.description], row)) for row in rows]
-        
-        # Nutze suggest_maintenance_times aus utils
-        suggestions = suggest_maintenance_times(device, predictions, days_ahead=30)
-        
-        # Gib Top-N zurück
-        return suggestions[:max_suggestions]
-    
-    def confirm_maintenance(self, device_id: str, scheduled_time: datetime, duration_minutes: int, confirmed_by: str = None) -> tuple[bool, Optional[str]]:
-        """
-        Bestätigt eine Wartung für ein Gerät
-        
-        Args:
-            device_id: ID des Geräts
-            scheduled_time: Geplante Wartungszeit
-            duration_minutes: Dauer der Wartung in Minuten
-            confirmed_by: Optional: Wer hat bestätigt
-            
-        Returns:
-            True wenn erfolgreich, False sonst
-        """
-        from utils import get_maintenance_duration
-        
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        
-        try:
-            # Prüfe ob die Spalten existieren
-            cursor.execute("PRAGMA table_info(device_maintenance)")
-            columns = cursor.fetchall()
-            column_names = [col[1] for col in columns]
-            
-            required_columns = ['scheduled_maintenance_time', 'maintenance_duration_minutes', 'maintenance_confirmed']
-            missing_columns = [col for col in required_columns if col not in column_names]
-            if missing_columns:
-                error_msg = f"Fehlende Spalten in Datenbank: {', '.join(missing_columns)}"
-                conn.close()
-                return False, error_msg
-            
-            # Validiere Eingaben
-            if not device_id:
-                conn.close()
-                return False, "Keine Geräte-ID angegeben"
-            
-            device_id = str(device_id).strip()
-            
-            # Prüfe ob Gerät existiert
-            cursor.execute("SELECT device_id FROM device_maintenance WHERE device_id = ?", (device_id,))
-            device_exists = cursor.fetchone()
-            
-            if not device_exists:
-                # Zeige alle verfügbaren device_ids für bessere Fehlermeldung
-                cursor.execute("SELECT device_id FROM device_maintenance LIMIT 10")
-                available_ids = [row[0] for row in cursor.fetchall()]
-                conn.close()
-                return False, f"Gerät '{device_id}' nicht in Datenbank gefunden. Verfügbare IDs: {', '.join(available_ids[:5])}"
-            
-            # Stelle sicher, dass scheduled_time ein datetime-Objekt ohne timezone ist
-            if hasattr(scheduled_time, 'tzinfo') and scheduled_time.tzinfo is not None:
-                scheduled_time = scheduled_time.replace(tzinfo=None)
-            
-            # Konvertiere scheduled_time zu String für SQLite
-            if isinstance(scheduled_time, datetime):
-                scheduled_time_str = scheduled_time.strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                scheduled_time_str = str(scheduled_time)
-            
-            # Aktualisiere Gerät mit bestätigter Wartung
-            cursor.execute("""
-                UPDATE device_maintenance
-                SET scheduled_maintenance_time = ?,
-                    maintenance_duration_minutes = ?,
-                    maintenance_confirmed = 1,
-                    maintenance_confirmed_by = ?,
-                    maintenance_confirmed_at = ?
-                WHERE device_id = ?
-            """, (scheduled_time_str, int(duration_minutes), confirmed_by, now.strftime('%Y-%m-%d %H:%M:%S'), device_id))
-            
-            rows_affected = cursor.rowcount
-            
-            if rows_affected == 0:
-                error_msg = f"Keine Zeilen aktualisiert. Device-ID '{device_id}' stimmt möglicherweise nicht überein."
-                conn.close()
-                return False, error_msg
-            
-            conn.commit()
-            
-            # Verifiziere, dass die Daten gespeichert wurden
-            cursor.execute("""
-                SELECT scheduled_maintenance_time, maintenance_confirmed, maintenance_duration_minutes
-                FROM device_maintenance 
-                WHERE device_id = ?
-            """, (device_id,))
-            result = cursor.fetchone()
-            # Verifikation erfolgreich - Daten wurden gespeichert
-            conn.close()
-            return True, None
-        except Exception as e:
-            error_msg = f"Fehler beim Speichern: {type(e).__name__}: {str(e)}"
-            import traceback
-            traceback.print_exc()
-            try:
-                conn.rollback()
-                conn.close()
-            except:
-                pass
-            return False, error_msg
-    
-    def complete_maintenance(self, device_id: str) -> bool:
-        """
-        Markiert eine Wartung als abgeschlossen und aktualisiert last_maintenance und next_maintenance_due
-        
-        Args:
-            device_id: ID des Geräts
-            
-        Returns:
-            True wenn erfolgreich, False sonst
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        
-        try:
-            # Hole aktuelle Gerätedaten
-            cursor.execute("""
-                SELECT * FROM device_maintenance
-                WHERE device_id = ?
-            """, (device_id,))
-            row = cursor.fetchone()
-            
-            if not row:
-                conn.close()
-                return False
-            
-            device = dict(zip([col[0] for col in cursor.description], row))
-            
-            # Berechne neues next_maintenance_due (typischerweise 6 Monate nach letzter Wartung)
-            # Oder basierend auf Gerätetyp
-            maintenance_interval_days = 180  # Standard: 6 Monate
-            
-            # Spezielle Intervalle für bestimmte Gerätetypen
-            device_type = device.get('device_type', '')
-            if 'CT' in device_type or 'MRT' in device_type:
-                maintenance_interval_days = 90  # 3 Monate für Bildgebung
-            elif 'Beatmungsgerät' in device_type or 'Life Support' in device_type:
-                maintenance_interval_days = 60  # 2 Monate für Lebensunterstützung
-            
-            new_next_due = now + timedelta(days=maintenance_interval_days)
-            
-            # Aktualisiere last_maintenance und next_maintenance_due
-            cursor.execute("""
-                UPDATE device_maintenance
-                SET last_maintenance = ?,
-                    next_maintenance_due = ?,
-                    scheduled_maintenance_time = NULL,
-                    maintenance_confirmed = 0,
-                    maintenance_confirmed_by = NULL,
-                    maintenance_confirmed_at = NULL,
-                    usage_hours = 0
-                WHERE device_id = ?
-            """, (now.date(), new_next_due.date(), device_id))
-            
-            conn.commit()
-            conn.close()
-            return True
-        except Exception as e:
-            conn.rollback()
-            conn.close()
-            return False
     
     def get_discharge_planning(self) -> List[Dict]:
         """Hole aggregierte Entlassungsplanungsdaten"""

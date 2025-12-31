@@ -19,43 +19,11 @@ from ui.components import render_badge, render_empty_state
 
 def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get_cached_capacity=None):
     """Rendert die Dashboard-Seite"""
-    # #region agent log
-    import json
-    import os
-    log_path = '/Users/erwan/Programmieren/ItManagementV3/hospital-flow-main/.cursor/debug.log'
-    try:
-        safe_log = os.path.join(os.getcwd(), '.cursor', 'debug.log')
-        log_dir_to_create = os.path.dirname(safe_log)
-        if not os.path.exists(log_dir_to_create):
-            os.makedirs(log_dir_to_create, exist_ok=True)
-        log_to_use = safe_log
-        db_type = str(type(db))
-        db_methods = [m for m in dir(db) if not m.startswith('_')]
-        has_method = hasattr(db, 'get_device_maintenance_urgencies')
-        method_in_dir = 'get_device_maintenance_urgencies' in db_methods
-        with open(log_to_use, 'a') as f:
-            f.write(json.dumps({'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'A,B,C,D', 'location': 'dashboard.py:22', 'message': 'DB object inspection', 'data': {'db_type': db_type, 'has_method': has_method, 'method_in_dir': method_in_dir, 'method_count': len(db_methods), 'sample_methods': db_methods[:10], 'log_used': log_to_use}, 'timestamp': int(__import__('time').time() * 1000)}) + '\n')
-    except Exception as e:
-        try:
-            log_dir_to_create = os.path.dirname(log_path)
-            if not os.path.exists(log_dir_to_create):
-                os.makedirs(log_dir_to_create, exist_ok=True)
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'A,B,C,D,E', 'location': 'dashboard.py:32', 'message': 'DB inspection error', 'data': {'error': str(e), 'error_type': type(e).__name__}, 'timestamp': int(__import__('time').time() * 1000)}) + '\n')
-        except:
-            pass
-    # #endregion
     # Daten abrufen (gecacht, um Flackern zu vermeiden)
     alerts = get_cached_alerts()
     recommendations = get_cached_recommendations()
     transport = db.get_transport_requests()
     inventory = db.get_inventory_status()
-    # #region agent log
-    try:
-        with open(log_path, 'a') as f:
-            f.write(json.dumps({'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'A,B,C,D', 'location': 'dashboard.py:27', 'message': 'Before get_device_maintenance_urgencies call', 'data': {'db_type': str(type(db)), 'has_method': hasattr(db, 'get_device_maintenance_urgencies')}, 'timestamp': int(__import__('time').time() * 1000)}) + '\n')
-    except: pass
-    # #endregion
     devices = db.get_device_maintenance_urgencies()
     predictions = db.get_predictions(15)
     

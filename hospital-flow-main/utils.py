@@ -224,6 +224,251 @@ def get_max_usage_hours(device_type: str) -> int:
     return max_hours_mapping.get(device_type, 4000)  # Default: 4000 Stunden
 
 
+def get_maintenance_duration(device_type: str) -> int:
+    """
+    Gibt die Standard-Wartungsdauer in Minuten für einen Gerätetyp zurück
+    
+    Args:
+        device_type: Der Gerätetyp
+        
+    Returns:
+        Wartungsdauer in Minuten
+    """
+    # Mapping für Wartungsdauern basierend auf Gerätetyp
+    duration_mapping = {
+        # Bildgebung - längere Wartung
+        'CT-Gerät': 240,  # 4 Stunden
+        'MRT-Gerät': 300,  # 5 Stunden
+        'Röntgengerät': 180,  # 3 Stunden
+        'Ultraschallgerät': 120,  # 2 Stunden
+        # Lebensunterstützung - kritisch, aber schnellere Wartung
+        'Beatmungsgerät': 90,  # 1.5 Stunden
+        'Defibrillator': 60,  # 1 Stunde
+        # Überwachung - kürzere Wartung
+        'Monitor': 60,  # 1 Stunde
+        'OP-Monitor': 60,  # 1 Stunde
+        'EKG-Gerät': 45,  # 45 Minuten
+        # Chirurgisch
+        'Surgical': 120,  # 2 Stunden
+        # Standard für unbekannte Typen
+    }
+    
+    # Prüfe auch englische Bezeichnungen
+    english_mapping = {
+        'Imaging': 180,
+        'Life Support': 90,
+        'Emergency': 60,
+        'Monitoring': 60,
+        'Therapy': 90,
+        'Surgical': 120,
+        'Diagnostic': 90,
+        'Other': 60,
+    }
+    
+    # Zuerst spezifische deutsche Bezeichnungen prüfen
+    if device_type in duration_mapping:
+        return duration_mapping[device_type]
+    
+    # Dann englische Bezeichnungen
+    if device_type in english_mapping:
+        return english_mapping[device_type]
+    
+    # Default: 90 Minuten (1.5 Stunden)
+    return 90
+
+
+def suggest_maintenance_times(device: Dict, predictions: List[Dict], days_ahead: int = 30) -> List[Dict]:
+    """
+    Schlägt optimale Wartungszeiten für ein Gerät vor.
+    
+    Args:
+        device: Gerätedaten (mit urgency_level, next_maintenance_due, department, device_type)
+        predictions: Liste von Patientenvorhersagen (mit timestamp, predicted_value, department)
+        days_ahead: Wie viele Tage in die Zukunft schauen (Standard: 30)
+        
+    Returns:
+        Liste von vorgeschlagenen Zeitfenstern mit Score, sortiert nach Score (höchster zuerst)
+        Jedes Element enthält: start_time, end_time, score, expected_patients, reason
+    """
+    from datetime import datetime, timedelta, timezone
+    
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    suggestions = []
+    
+    # Bestimme Zeitfenster basierend auf Dringlichkeit
+    urgency = device.get('urgency_level', '').lower()
+    if urgency in ['high', 'hoch']:
+        max_days = 3
+        min_days = 0
+    elif urgency in ['medium', 'mittel']:
+        max_days = 7
+        min_days = 1
+    else:  # low/niedrig
+        max_days = min(days_ahead, 30)
+        min_days = 3
+    
+    # Hole next_maintenance_due
+    next_due = device.get('next_maintenance_due')
+    next_due_date = None
+    if next_due:
+        try:
+            if isinstance(next_due, str):
+                next_due_date = datetime.strptime(next_due, '%Y-%m-%d').date()
+            elif isinstance(next_due, datetime):
+                next_due_date = next_due.date()
+            else:
+                # Versuche als date zu behandeln
+                next_due_date = next_due if hasattr(next_due, 'year') else None
+            if next_due_date:
+                days_until_due = (next_due_date - now.date()).days
+            else:
+                days_until_due = None
+        except:
+            days_until_due = None
+    else:
+        days_until_due = None
+    
+    # Wartungsdauer
+    device_type = device.get('device_type', '')
+    duration_minutes = get_maintenance_duration(device_type)
+    duration_hours = duration_minutes / 60.0
+    
+    # Abteilung des Geräts
+    department = device.get('department', '')
+    
+    # Filtere Vorhersagen für diese Abteilung
+    dept_predictions = [p for p in predictions if p.get('department') == department and p.get('prediction_type') == 'patient_arrival']
+    
+    # Generiere Kandidaten-Zeiten in 3-Stunden-Schritten
+    # Bevorzuge Zeiten außerhalb der Hauptarbeitszeit (weniger Patienten)
+    # Ideal: 22:00-06:00 oder 12:00-14:00 (Mittagspause)
+    
+    current_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if min_days > 0:
+        current_date += timedelta(days=min_days)
+    
+    end_date = current_date + timedelta(days=max_days - min_days)
+    
+    # Generiere Zeitfenster-Kandidaten
+    candidate_times = []
+    date = current_date
+    
+    while date <= end_date:
+        # Bevorzuge verschiedene Tageszeiten
+        time_slots = [
+            (2, 0),   # 02:00 - Nacht (sehr niedrige Patientenlast)
+            (6, 0),   # 06:00 - Früher Morgen
+            (12, 0),  # 12:00 - Mittagspause
+            (14, 0),  # 14:00 - Nachmittag
+            (22, 0),  # 22:00 - Später Abend
+        ]
+        
+        for hour, minute in time_slots:
+            candidate_time = date.replace(hour=hour, minute=minute)
+            if candidate_time > now:  # Nur zukünftige Zeiten
+                candidate_times.append(candidate_time)
+        
+        date += timedelta(days=1)
+    
+    # Bewerte jeden Kandidaten
+    for start_time in candidate_times:
+        end_time = start_time + timedelta(hours=duration_hours)
+        
+        # Berechne erwartete Patientenlast für dieses Zeitfenster
+        expected_patients = 0
+        prediction_count = 0
+        
+        # Finde relevante Vorhersagen für dieses Zeitfenster
+        for pred in dept_predictions:
+            pred_time = pred.get('timestamp')
+            if isinstance(pred_time, str):
+                try:
+                    pred_time = datetime.strptime(pred_time, '%Y-%m-%d %H:%M:%S')
+                except:
+                    try:
+                        pred_time = datetime.strptime(pred_time, '%Y-%m-%d')
+                    except:
+                        continue
+            elif not isinstance(pred_time, datetime):
+                continue
+            
+            # Prüfe ob Vorhersage in unserem Zeitfenster liegt
+            time_horizon = pred.get('time_horizon_minutes', 15)
+            pred_end = pred_time + timedelta(minutes=time_horizon)
+            
+            # Überschneidung?
+            if (pred_time <= end_time and pred_end >= start_time):
+                expected_patients += pred.get('predicted_value', 0)
+                prediction_count += 1
+        
+        # Normalisiere auf Stunden (falls mehrere Vorhersagen)
+        if prediction_count > 0:
+            # Skaliere basierend auf Dauer
+            expected_patients = expected_patients * (duration_hours / (prediction_count * 0.25))  # 0.25 = 15min in Stunden
+        
+        # Score-Berechnung
+        # 1. Dringlichkeit (40%): Je näher am Fälligkeitsdatum, desto besser
+        urgency_score = 0.0
+        if days_until_due is not None and next_due_date:
+            days_diff = abs((start_time.date() - next_due_date).days)
+            if days_until_due < 0:  # Überfällig
+                urgency_score = 1.0 if days_diff <= 1 else max(0.7, 1.0 - (days_diff / 7))
+            elif days_until_due <= 3:
+                urgency_score = max(0.8, 1.0 - (days_diff / 5))
+            elif days_until_due <= 7:
+                urgency_score = max(0.6, 1.0 - (days_diff / 10))
+            else:
+                urgency_score = max(0.4, 1.0 - (days_diff / 20))
+        else:
+            urgency_score = 0.5  # Neutral wenn kein Fälligkeitsdatum
+        
+        # 2. Patientenlast (40%): Niedrigere Last = besser
+        # Normalisiere auf 0-1 (0 Patienten = 1.0, 10+ Patienten = 0.0)
+        patient_score = max(0.0, min(1.0, 1.0 - (expected_patients / 10.0)))
+        
+        # 3. Zeit bis Fälligkeit (20%): Je näher, desto besser (aber nicht überfällig)
+        time_score = 0.5
+        if days_until_due is not None:
+            days_to_start = (start_time.date() - now.date()).days
+            if days_until_due < 0:  # Überfällig - sofort ist am besten
+                time_score = 1.0 if days_to_start <= 1 else 0.8
+            elif days_until_due <= 3:
+                time_score = 1.0 if days_to_start <= days_until_due else 0.7
+            elif days_until_due <= 7:
+                time_score = 0.9 if days_to_start <= days_until_due else 0.6
+            else:
+                time_score = 0.8 if days_to_start <= days_until_due else 0.5
+        
+        # Gesamt-Score (gewichtet)
+        total_score = (urgency_score * 0.4) + (patient_score * 0.4) + (time_score * 0.2)
+        
+        # Grund für Vorschlag
+        reasons = []
+        if urgency_score > 0.7:
+            reasons.append("Passt gut zum Fälligkeitsdatum")
+        if patient_score > 0.7:
+            reasons.append("Niedrige erwartete Patientenlast")
+        if time_score > 0.7:
+            reasons.append("Gute Timing")
+        
+        reason_text = "; ".join(reasons) if reasons else "Geeignete Zeit"
+        
+        suggestions.append({
+            'start_time': start_time,
+            'end_time': end_time,
+            'score': round(total_score, 2),
+            'expected_patients': round(expected_patients, 1),
+            'reason': reason_text,
+            'duration_minutes': duration_minutes
+        })
+    
+    # Sortiere nach Score (höchster zuerst)
+    suggestions.sort(key=lambda x: x['score'], reverse=True)
+    
+    # Gib Top 10 zurück
+    return suggestions[:10]
+
+
 def calculate_device_urgency(days_until_maintenance: int, usage_hours: int, max_usage_hours: int) -> str:
     """
     Berechne die Wartungsdringlichkeit eines Geräts basierend auf:

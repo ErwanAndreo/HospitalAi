@@ -100,11 +100,32 @@ def render(db, sim):
             for category_list in staff_by_category.values():
                 all_staff.extend(category_list)
             
-            selected_person = next((p for p in all_staff if p['id'] == st.session_state.selected_staff_id), None)
+            # Robuster Vergleich mit Typkonvertierung
+            selected_staff_id = st.session_state.selected_staff_id
+            selected_person = None
+            for p in all_staff:
+                # Konvertiere beide zu int für Vergleich
+                try:
+                    p_id = int(p.get('id', 0))
+                    s_id = int(selected_staff_id) if selected_staff_id is not None else None
+                    if p_id == s_id:
+                        selected_person = p
+                        break
+                except (ValueError, TypeError):
+                    # Fallback: direkter Vergleich
+                    if p.get('id') == selected_staff_id:
+                        selected_person = p
+                        break
             
             if not selected_person:
-                st.error("Person nicht gefunden")
-                return
+                # Person nicht gefunden - wähle automatisch die erste verfügbare Person
+                if all_staff:
+                    first_person = all_staff[0]
+                    st.session_state.selected_staff_id = first_person.get('id')
+                    selected_person = first_person
+                else:
+                    st.error("Person nicht gefunden und keine Alternative verfügbar")
+                    return
             
             # Detailansicht
             render_staff_detail(db, selected_person, st.session_state.current_week_start)

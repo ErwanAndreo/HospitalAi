@@ -34,6 +34,9 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
             # Bereich Dropdown mit deutschen Übersetzungen
             # Verwende get_cached_alerts() wie im Dashboard, um nur nicht aufgelöste Warnungen zu bekommen
             all_alerts = get_cached_alerts() if get_cached_alerts else db.get_active_alerts()
+            # Severity-Mapping für Filter (Deutsch -> Englisch)
+            severity_de_map = {'high': 'hoch', 'medium': 'mittel', 'low': 'niedrig'}
+            severity_en_map = {v: k for k, v in severity_de_map.items()}
             dept_map = {
                 'ER': 'Notaufnahme',
                 'ED': 'Notaufnahme',
@@ -145,20 +148,15 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
         if selected_area is not None:
             filtered_alerts = [a for a in filtered_alerts if a.get('department') == selected_area]
         if "Alle" not in selected_severities:
-            filtered_alerts = [a for a in filtered_alerts if a['severity'] in selected_severities]
+            # Deutsche Filterwerte in englische umwandeln für Vergleich mit Alert-Werten
+            selected_severities_en = [severity_en_map.get(sev, sev) for sev in selected_severities]
+            filtered_alerts = [a for a in filtered_alerts if a['severity'] in selected_severities_en]
         
         # Warnungen als kompakte Karten anzeigen
         if filtered_alerts:
             for alert in filtered_alerts:
                 severity_color = get_severity_color(alert['severity'])
                 badge_html = render_badge(alert['severity'].upper(), alert['severity'])
-                # Vorhergesagte Minuten aus verwandten Vorhersagen abrufen, falls verfügbar
-                predictions = db.get_predictions(15)
-                predicted_minutes = None
-                for pred in predictions:
-                    if pred.get('department') == alert.get('department') and pred.get('prediction_type') in ['patient_arrival', 'bed_demand', 'resource_needed']:
-                        predicted_minutes = pred.get('time_horizon_minutes')
-                        break
                 # Abteilung für Anzeige übersetzen
                 dept_map = {
                     'ER': 'Notaufnahme',
@@ -180,16 +178,12 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                 dept_de = dept_map.get(alert.get('department', 'N/A'), alert.get('department', 'N/A'))
                 col1, col2 = st.columns([5, 1])
                 with col1:
-                    pred_text = f" • Prognose: {predicted_minutes} Min." if predicted_minutes else ""
-                    pred_html = f'<span style="font-size: 0.75rem; color: #667eea;">{pred_text}</span>' if predicted_minutes else ''
-                    
                     st.html(f"""<div style="background: white; padding: 1rem; border-radius: 8px; margin-bottom: 0.75rem; border-left: 4px solid {severity_color}; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
                         <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem;">
                             {badge_html}
                             <span style="font-size: 0.75rem; color: #6b7280; font-weight: 500;">{dept_de}</span>
                             <span style="font-size: 0.75rem; color: #9ca3af;">•</span>
                             <span style="font-size: 0.75rem; color: #6b7280;">{format_time_ago(alert['timestamp'])}</span>
-                            {pred_html}
                         </div>
                         <div style="font-weight: 600; color: #1f2937; font-size: 0.95rem;">
                             {alert['message']}
