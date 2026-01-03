@@ -4,6 +4,7 @@ Seitenmodul für Betrieb
 import streamlit as st
 from datetime import datetime, timedelta, timezone
 import pandas as pd
+import time
 from utils import (
     format_time_ago, get_severity_color, get_priority_color, get_risk_color,
     get_status_color, calculate_inventory_status, calculate_capacity_status,
@@ -193,7 +194,7 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                     
                     # Bestätigt-Badge hinzufügen wenn bestätigt
                     if is_acknowledged:
-                        acknowledged_badge = render_badge("✓ BESTÄTIGT", "medium")  # Blau-ähnlich
+                        acknowledged_badge = '<span class="badge" style="background: #3B82F6; color: white;">✓ BESTÄTIGT</span>'  # Blau
                         badge_html = f"{badge_html} {acknowledged_badge}"
                     
                     # Abteilung für Anzeige übersetzen
@@ -233,7 +234,15 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                         else:
                             if st.button("Bestätigen", key=f"ops_ack_{alert['id']}", use_container_width=True):
                                 db.acknowledge_alert(alert['id'])
-                                st.cache_data.clear()  # Cache leeren nach wichtiger Aktion
+                                # Cache invalidieren, damit die Seite aktualisiert wird
+                                if 'background_data' in st.session_state:
+                                    # Aktualisiere die Alerts direkt im Cache
+                                    updated_alerts = db.get_active_alerts()
+                                    st.session_state.background_data['alerts'] = updated_alerts
+                                    st.session_state.background_data['timestamp'] = time.time()
+                                # Cache-Timestamp zurücksetzen, damit Background-Daten sofort aktualisiert werden
+                                if 'background_data_timestamp' in st.session_state:
+                                    st.session_state.background_data_timestamp = 0
                                 st.rerun()
             else:
                 st.markdown("""

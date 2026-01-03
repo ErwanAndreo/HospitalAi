@@ -481,6 +481,7 @@ class HospitalDB:
                     value REAL,
                     acknowledged INTEGER DEFAULT 0,
                     resolved_at TEXT,
+                    alert_type TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
                 """)
@@ -863,6 +864,7 @@ class HospitalDB:
                     'resolved_at': 'TEXT',
                     'acknowledged': 'INTEGER DEFAULT 0',
                     'department': 'TEXT',
+                    'alert_type': 'TEXT',
                     'created_at': 'TEXT DEFAULT CURRENT_TIMESTAMP'
                 }
                 
@@ -1729,7 +1731,95 @@ class HospitalDB:
     
     def get_capacity_from_simulation(self, sim_metrics: Dict) -> List[Dict]:
         """Gibt Kapazitätsdaten basierend auf Simulationsmetriken zurück"""
-        # Berechne Kapazität aus Simulation
+        # Prüfe ob abteilungsbezogene Bettbelegung vorhanden ist
+        department_beds = sim_metrics.get('department_beds')
+        
+        if department_beds:
+            # Verwende abteilungsbezogene Daten direkt
+            capacity = []
+            
+            for dept, dept_data in department_beds.items():
+                total_beds = dept_data.get('total_beds', 0)
+                
+                if total_beds > 0:
+                    # Für ER/ED-Abteilung: Verwende ed_load aus sim_metrics für Konsistenz mit Dashboard
+                    # WICHTIG: utilization_percent direkt aus ed_load, nicht neu berechnen!
+                    if dept in ('ER', 'ED'):
+                        ed_load = sim_metrics.get('ed_load', 65.0)  # Fallback auf 65% wenn nicht vorhanden
+                        utilization = ed_load / 100.0  # ed_load ist in Prozent (0-100), utilization ist 0.0-1.0
+                        # occupied_beds wird aus utilization berechnet, nicht umgekehrt
+                        occupied_beds = int(total_beds * utilization)
+                        available_beds = total_beds - occupied_beds
+                        # utilization_percent direkt aus ed_load, um Rundungsfehler zu vermeiden
+                        utilization_percent = ed_load
+                    else:
+                        # Für alle anderen Abteilungen: Prüfe ob utilization_rate bereits vorhanden ist
+                        if 'utilization_rate' in dept_data and dept_data['utilization_rate'] is not None:
+                            # Verwende vorhandene utilization_rate (keine Neuberechnung)
+                            utilization = dept_data['utilization_rate']
+                            utilization_percent = utilization * 100
+                            # Berechne occupied_beds aus utilization_rate
+                            occupied_beds = int(total_beds * utilization)
+                            available_beds = total_beds - occupied_beds
+                        else:
+                            # Fallback: Verwende Werte aus department_beds und berechne utilization
+                            occupied_beds = dept_data.get('occupied_beds', 0)
+                            available_beds = dept_data.get('available_beds', 0)
+                            if total_beds > 0:
+                                utilization = occupied_beds / total_beds
+                                utilization_percent = utilization * 100
+                            else:
+                                utilization = 0.0
+                                utilization_percent = 0.0
+                    
+                    capacity.append({
+                        'department': dept,
+                        'total_beds': total_beds,
+                        'occupied_beds': occupied_beds,
+                        'available_beds': available_beds,
+                        'free_beds': available_beds,
+                        'utilization_rate': utilization,
+                        'utilization_percent': utilization_percent
+                    })
+            
+            # Füge zusätzliche Abteilungen hinzu, die nicht in department_beds sind
+            # (für Rückwärtskompatibilität)
+            # Erstelle Set der bereits vorhandenen Abteilungen, um Duplikate zu vermeiden
+            existing_depts = {cap['department'] for cap in capacity}
+            
+            additional_depts = {
+                'General Ward': 12,
+                'Radiology': 0,
+                'Neurology': 6,
+                'Pediatrics': 5,
+                'Oncology': 5,
+                'Maternity': 0
+            }
+            
+            beds_free = int(sim_metrics.get('beds_free', 0))
+            total_beds_all = sum(d.get('total_beds', 0) for d in department_beds.values()) + sum(additional_depts.values())
+            
+            for dept, dept_total in additional_depts.items():
+                # Nur hinzufügen, wenn Abteilung noch nicht vorhanden ist
+                if dept_total > 0 and dept not in existing_depts:
+                    # Verwende proportionale Verteilung für zusätzliche Abteilungen
+                    dept_occupied = max(0, dept_total - int(beds_free * (dept_total / total_beds_all) if total_beds_all > 0 else 0))
+                    dept_available = dept_total - dept_occupied
+                    utilization = dept_occupied / dept_total if dept_total > 0 else 0
+                    
+                    capacity.append({
+                        'department': dept,
+                        'total_beds': dept_total,
+                        'occupied_beds': dept_occupied,
+                        'available_beds': dept_available,
+                        'free_beds': dept_available,
+                        'utilization_rate': utilization,
+                        'utilization_percent': utilization * 100
+                    })
+            
+            return capacity
+        
+        # Fallback: Alte Logik (proportionale Verteilung)
         beds_free = int(sim_metrics.get('beds_free', 0))
         total_beds = 170  # Standard-Gesamtbetten
         
@@ -1767,9 +1857,20 @@ class HospitalDB:
             dept_total = dept_beds.get(dept, 0)
             # Nur Abteilungen mit Betten anzeigen
             if dept_total > 0:
-                dept_occupied = max(0, dept_total - int(beds_free * (dept_total / total_beds)))
-                dept_available = dept_total - dept_occupied
-                utilization = dept_occupied / dept_total if dept_total > 0 else 0
+                # Für ER/ED-Abteilung: Verwende ed_load aus sim_metrics für Konsistenz mit Dashboard
+                if dept in ('ER', 'ED'):
+                    ed_load = sim_metrics.get('ed_load', 65.0)  # Fallback auf 65% wenn nicht vorhanden
+                    utilization = ed_load / 100.0  # ed_load ist in Prozent (0-100), utilization ist 0.0-1.0
+                    dept_occupied = int(dept_total * utilization)
+                    dept_available = dept_total - dept_occupied
+                    # utilization_percent direkt aus ed_load, um Rundungsfehler zu vermeiden
+                    utilization_percent = ed_load
+                else:
+                    # Für alle anderen Abteilungen: Proportionale Verteilung basierend auf beds_free
+                    dept_occupied = max(0, dept_total - int(beds_free * (dept_total / total_beds)))
+                    dept_available = dept_total - dept_occupied
+                    utilization = dept_occupied / dept_total if dept_total > 0 else 0
+                    utilization_percent = utilization * 100
                 
                 capacity.append({
                     'department': dept,
@@ -1778,7 +1879,7 @@ class HospitalDB:
                     'available_beds': dept_available,
                     'free_beds': dept_available,
                     'utilization_rate': utilization,
-                    'utilization_percent': utilization * 100
+                    'utilization_percent': utilization_percent
                 })
         
         return capacity

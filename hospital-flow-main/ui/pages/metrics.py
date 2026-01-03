@@ -306,14 +306,32 @@ def render_alerts_section(df: pd.DataFrame, search_text: str, selected_departmen
     if not critical_alerts.empty:
         st.markdown("#### Kritische Warnungen")
         for _, alert in critical_alerts.head(5).iterrows():
-            severity_color = get_severity_color(alert['severity'])
+            # Prüfe ob Warnung bestätigt wurde
+            is_acknowledged = alert.get('acknowledged', 0) == 1 if 'acknowledged' in alert else False
+            if isinstance(is_acknowledged, (int, float)):
+                is_acknowledged = is_acknowledged == 1
+            
+            # Wenn bestätigt, verwende blaue Farbe, sonst normale Severity-Farbe
+            if is_acknowledged:
+                border_color = "#3B82F6"  # Blau (blue-500)
+                background_color = "#EFF6FF"  # Sehr helles Blau für Hintergrund
+            else:
+                border_color = get_severity_color(alert['severity'])
+                background_color = "white"
+            
             severity_de = SEVERITY_MAP.get(alert['severity'], alert['severity'])
             badge_html = render_badge(severity_de.upper(), alert['severity'])
+            
+            # Bestätigt-Badge hinzufügen wenn bestätigt
+            if is_acknowledged:
+                acknowledged_badge = '<span class="badge" style="background: #3B82F6; color: white;">✓ BESTÄTIGT</span>'  # Blau
+                badge_html = f"{badge_html} {acknowledged_badge}"
+            
             dept = DEPT_MAP.get(alert.get('department', 'N/A'), alert.get('department', 'N/A'))
             
             st.markdown(f"""
-            <div style="background: white; padding: 1rem; border-radius: 8px; margin-bottom: 0.75rem; 
-                        border-left: 4px solid {severity_color}; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+            <div style="background: {background_color}; padding: 1rem; border-radius: 8px; margin-bottom: 0.75rem; 
+                        border-left: 4px solid {border_color}; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
                 {badge_html}
                 <strong style="margin-left: 0.5rem; color: #1f2937;">{alert['message']}</strong>
                 <div style="color: #6b7280; font-size: 0.875rem; margin-top: 0.5rem;">
@@ -1002,7 +1020,46 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
     # Rendere Sektionen mit Lazy Loading
     # Daten werden erst geladen wenn Tab tatsächlich gerendert wird
     with tabs[0]:
-        # Metriken-Tab: Lade Daten lazy
+        # Metriken-Tab: Zeige zuerst aktuelle Werte aus sim_metrics (konsistent mit Dashboard)
+        if sim:
+            sim_metrics = None
+            if 'cached_sim_metrics' in st.session_state:
+                sim_metrics = st.session_state.cached_sim_metrics
+            else:
+                sim_metrics = sim.get_current_metrics() if sim else {}
+            
+            if sim_metrics:
+                st.markdown("#### Aktuelle Werte (Live)")
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    ed_load = sim_metrics.get('ed_load', 0)
+                    st.metric("Notaufnahme-Auslastung", f"{ed_load:.0f}%")
+                with col2:
+                    waiting_count = int(sim_metrics.get('waiting_count', 0))
+                    st.metric("Wartende Patienten", waiting_count)
+                with col3:
+                    beds_free = int(sim_metrics.get('beds_free', 0))
+                    st.metric("Freie Betten", beds_free)
+                with col4:
+                    staff_load = sim_metrics.get('staff_load', 0)
+                    st.metric("Personal-Auslastung", f"{staff_load:.0f}%")
+                
+                col5, col6, col7 = st.columns(3)
+                with col5:
+                    rooms_free = int(sim_metrics.get('rooms_free', 0))
+                    st.metric("Freie Räume", rooms_free)
+                with col6:
+                    or_load = sim_metrics.get('or_load', 0)
+                    st.metric("OP-Auslastung", f"{or_load:.0f}%")
+                with col7:
+                    transport_queue = int(sim_metrics.get('transport_queue', 0))
+                    st.metric("Transport-Warteschlange", transport_queue)
+                
+                st.markdown("---")
+                st.markdown("#### Historische Daten")
+        
+        # Lade historische Daten lazy
         try:
             metrics_data = get_metrics_data_lazy(db, time_range_minutes)
             metrics_df = pd.DataFrame(metrics_data) if metrics_data else pd.DataFrame()

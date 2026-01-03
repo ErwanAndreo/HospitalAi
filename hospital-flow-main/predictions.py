@@ -22,7 +22,7 @@ class PredictionEngine:
         """
         self.db = db
     
-    def predict_patient_arrival(self, time_horizon_minutes: int, department: str = 'ER') -> Dict:
+    def predict_patient_arrival(self, time_horizon_minutes: int, department: str) -> Dict:
         """
         Vorhersage für Patientenzugang.
         
@@ -98,7 +98,7 @@ class PredictionEngine:
             'model_version': 'v1.0-statistical'
         }
     
-    def predict_bed_demand(self, time_horizon_minutes: int, department: str = 'ICU') -> Dict:
+    def predict_bed_demand(self, time_horizon_minutes: int, department: str) -> Dict:
         """
         Vorhersage für Bettenbedarf.
         
@@ -204,54 +204,39 @@ class PredictionEngine:
         capacity_data = self.db.get_capacity_overview()
         all_departments = [c['department'] for c in capacity_data if c.get('department')]
         
-        # Falls keine Abteilungen gefunden, verwende Standard-Abteilungen
+        # Falls keine Abteilungen gefunden, kann keine Vorhersage generiert werden
         if not all_departments:
-            all_departments = ['ER', 'ICU', 'Surgery', 'Cardiology', 'General Ward', 
-                              'Orthopedics', 'Urology', 'Gastroenterology', 'Geriatrics']
+            return []
         
         # Wähle Abteilungen für Patientenzugang-Vorhersagen
-        # ER ist primär, dann wähle eine weitere relevante Abteilung
+        # Verwende die ersten verfügbaren Abteilungen aus der Datenbank
         patient_arrival_depts = []
-        if 'ER' in all_departments:
-            patient_arrival_depts.append('ER')
-        
-        # Wähle eine weitere relevante Abteilung für Patientenzugang
-        priority_for_arrival = ['ICU', 'Surgery', 'Cardiology', 'General Ward']
-        for dept in priority_for_arrival:
-            if dept in all_departments and dept not in patient_arrival_depts and len(patient_arrival_depts) < 2:
+        for dept in all_departments:
+            if len(patient_arrival_depts) < 2:
                 patient_arrival_depts.append(dept)
         
-        # Falls noch nicht genug, füge weitere Abteilungen hinzu
-        remaining_for_arrival = [d for d in all_departments if d not in patient_arrival_depts]
-        while len(patient_arrival_depts) < 2 and remaining_for_arrival:
-            patient_arrival_depts.append(remaining_for_arrival.pop(0))
-        
-        # Fallback falls immer noch nicht genug
-        if len(patient_arrival_depts) < 2:
-            if 'ER' not in patient_arrival_depts:
-                patient_arrival_depts.insert(0, 'ER')
-            if len(patient_arrival_depts) < 2:
-                patient_arrival_depts.append('ER')
+        # Falls nur eine Abteilung vorhanden, verwende sie zweimal
+        if len(patient_arrival_depts) == 1:
+            patient_arrival_depts.append(patient_arrival_depts[0])
         
         # Wähle Abteilungen für Bettenbedarf-Vorhersagen
-        # Priorisiere ICU und ER, dann andere Abteilungen
+        # Verwende die ersten verfügbaren Abteilungen, die noch nicht für Patientenzugang verwendet wurden
         bed_demand_depts = []
-        priority_depts = ['ICU', 'ER', 'Surgery', 'Cardiology', 'General Ward']
-        for dept in priority_depts:
-            if dept in all_departments and len(bed_demand_depts) < 2:
+        # Versuche zuerst andere Abteilungen zu verwenden
+        for dept in all_departments:
+            if dept not in patient_arrival_depts and len(bed_demand_depts) < 2:
                 bed_demand_depts.append(dept)
         
-        # Falls noch nicht genug, füge weitere Abteilungen hinzu
+        # Falls nicht genug verschiedene Abteilungen vorhanden, verwende auch die bereits verwendeten
         remaining_depts = [d for d in all_departments if d not in bed_demand_depts]
         while len(bed_demand_depts) < 2 and remaining_depts:
             bed_demand_depts.append(remaining_depts.pop(0))
         
-        # Fallback falls immer noch nicht genug
+        # Falls immer noch nicht genug, verwende die ersten Abteilungen erneut
         if len(bed_demand_depts) < 2:
-            if 'ICU' not in bed_demand_depts:
-                bed_demand_depts.insert(0, 'ICU')
-            if len(bed_demand_depts) < 2:
-                bed_demand_depts.append('ER')
+            for dept in all_departments:
+                if len(bed_demand_depts) < 2:
+                    bed_demand_depts.append(dept)
         
         # Generiere 6 Patientenzugang-Vorhersagen (2 Abteilungen × 3 Zeithorizonte)
         for dept in patient_arrival_depts[:2]:  # Sicherstellen, dass nur 2 verwendet werden

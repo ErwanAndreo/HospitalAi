@@ -295,6 +295,10 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
             # Aggregiere auf 30-Sekunden-Intervalle
             df_ed = aggregate_to_30_seconds(df_ed, timestamp_col='timestamp', value_col='value', agg_func='mean')
             
+            # Aktuelle Werte für Annotationen
+            current_waiting = waiting_count
+            current_ed_load = ed_load
+            
             # Warteschlangen-Diagramm
             fig_waiting = px.line(
                 df_waiting,
@@ -303,6 +307,20 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                 title="Wartende Anzahl",
                 labels={'value': 'Anzahl', 'timestamp': ''}
             )
+            # Füge aktuellen Wert als letzten Punkt hinzu (falls nicht bereits enthalten)
+            if not df_waiting.empty:
+                last_timestamp = df_waiting['timestamp'].max()
+                current_time = pd.Timestamp.now(tz=last_timestamp.tz if hasattr(last_timestamp, 'tz') else None)
+                # Füge aktuellen Wert hinzu, wenn er sich vom letzten unterscheidet oder zu weit in der Zukunft ist
+                if (current_time - last_timestamp).total_seconds() > 30 or abs(df_waiting.iloc[-1]['value'] - current_waiting) > 0.5:
+                    fig_waiting.add_scatter(
+                        x=[current_time],
+                        y=[current_waiting],
+                        mode='markers',
+                        marker=dict(size=8, color='#667eea', symbol='circle'),
+                        name='Aktuell',
+                        showlegend=False
+                    )
             fig_waiting.update_layout(
                 height=250,
                 margin=dict(l=40, r=20, t=40, b=20),
@@ -326,6 +344,20 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                 title="Notaufnahme-Auslastung",
                 labels={'value': 'Auslastung %', 'timestamp': ''}
             )
+            # Füge aktuellen Wert als letzten Punkt hinzu (falls nicht bereits enthalten)
+            if not df_ed.empty:
+                last_timestamp = df_ed['timestamp'].max()
+                current_time = pd.Timestamp.now(tz=last_timestamp.tz if hasattr(last_timestamp, 'tz') else None)
+                # Füge aktuellen Wert hinzu, wenn er sich vom letzten unterscheidet oder zu weit in der Zukunft ist
+                if (current_time - last_timestamp).total_seconds() > 30 or abs(df_ed.iloc[-1]['value'] - current_ed_load) > 0.5:
+                    fig_ed.add_scatter(
+                        x=[current_time],
+                        y=[current_ed_load],
+                        mode='markers',
+                        marker=dict(size=8, color='#DC2626', symbol='circle'),
+                        name='Aktuell',
+                        showlegend=False
+                    )
             fig_ed.update_layout(
                 height=250,
                 margin=dict(l=40, r=20, t=40, b=20),
@@ -419,12 +451,28 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
         if alerts:
             severity_de_map = {'high': 'hoch', 'medium': 'mittel', 'low': 'niedrig'}
             for i, alert in enumerate(alerts[:5]):
-                severity_color = get_severity_color(alert['severity'])
+                # Prüfe ob Warnung bestätigt wurde
+                is_acknowledged = alert.get('acknowledged', 0) == 1
+                
+                # Wenn bestätigt, verwende blaue Farbe, sonst normale Severity-Farbe
+                if is_acknowledged:
+                    border_color = "#3B82F6"  # Blau (blue-500)
+                    background_color = "#EFF6FF"  # Sehr helles Blau für Hintergrund
+                else:
+                    border_color = get_severity_color(alert['severity'])
+                    background_color = "white"
+                
                 severity_de = severity_de_map.get(alert['severity'], alert['severity'])
                 badge_html = render_badge(severity_de.upper(), alert['severity'])
+                
+                # Bestätigt-Badge hinzufügen wenn bestätigt
+                if is_acknowledged:
+                    acknowledged_badge = '<span class="badge" style="background: #3B82F6; color: white;">✓ BESTÄTIGT</span>'  # Blau
+                    badge_html = f"{badge_html} {acknowledged_badge}"
+                
                 delay_class = "fade-in" if i == 0 else f"fade-in-delayed-{min(i, 3)}" if i <= 3 else "fade-in-delayed-3"
                 st.markdown(f"""
-                <div class="info-card {delay_class}" style="border-left: 4px solid {severity_color};">
+                <div class="info-card {delay_class}" style="background: {background_color}; border-left: 4px solid {border_color};">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
                         <div style="flex: 1;">
                             <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;">

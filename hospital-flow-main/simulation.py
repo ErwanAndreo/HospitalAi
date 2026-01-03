@@ -34,13 +34,31 @@ class HospitalSimulation:
         self.state = {
             'ed_load': 65.0,  # Notaufnahme-Auslastung (%)
             'waiting_count': 5,  # Wartende Patienten
-            'beds_free': 45,  # Freie Betten
+            'beds_free': 45,  # Freie Betten (wird als Summe aus department_beds berechnet)
             'staff_load': 70.0,  # Personal-Auslastung (%)
             'rooms_free': 12,  # Freie Räume
             'or_load': 60.0,  # OP-Auslastung (%)
             'transport_queue': 3,  # Transport-Warteschlange
             'inventory_risk_count': 1  # Anzahl kritischer Inventar-Artikel
         }
+        
+        # Abteilungsbezogene Bettbelegung (total_beds, occupied_beds, available_beds pro Abteilung)
+        # Bettenverteilung pro Abteilung (Summe = 170)
+        self.dept_beds_config = {
+            'ER': 25,
+            'ICU': 15,
+            'Surgery': 40,
+            'Cardiology': 30,
+            'Orthopedics': 10,
+            'Urology': 6,
+            'Gastroenterology': 6,
+            'Geriatrics': 5,
+            'SpineCenter': 3,
+            'ENT': 2
+        }
+        
+        # Initialisiere department_beds mit unterschiedlichen Basis-Auslastungen
+        self.state['department_beds'] = self._initialize_department_beds()
         
         # Aktive Ereignisse
         self.active_events = []
@@ -72,6 +90,46 @@ class HospitalSimulation:
         
         # Starte Update-Thread
         self.start()
+    
+    def _initialize_department_beds(self) -> Dict[str, Dict]:
+        """
+        Initialisiert abteilungsbezogene Bettbelegung mit unterschiedlichen Basis-Auslastungen.
+        
+        Returns:
+            Dict mit Abteilungsname als Key und Dict mit total_beds, occupied_beds, available_beds
+        """
+        department_beds = {}
+        
+        # Basis-Auslastungen pro Abteilung (realistische Werte)
+        base_utilizations = {
+            'ER': 0.65,        # Notaufnahme: 60-70% typisch
+            'ICU': 0.80,       # Intensivstation: 75-85% (höher)
+            'Surgery': 0.70,   # Chirurgie: 65-75%
+            'Cardiology': 0.68, # Kardiologie: 63-73%
+            'Orthopedics': 0.60, # Orthopädie: 55-65%
+            'Urology': 0.55,   # Urologie: 50-60%
+            'Gastroenterology': 0.58, # Gastroenterologie: 53-63%
+            'Geriatrics': 0.55, # Geriatrie: 50-60%
+            'SpineCenter': 0.50, # Wirbelsäulenzentrum: 45-55%
+            'ENT': 0.35        # HNO: 30-40% (niedriger)
+        }
+        
+        for dept, total_beds in self.dept_beds_config.items():
+            base_util = base_utilizations.get(dept, 0.60)
+            # Initialisiere mit zufälliger Variation um Basiswert
+            initial_util = base_util + random.uniform(-0.10, 0.10)
+            initial_util = max(0.20, min(0.95, initial_util))  # Begrenze auf 20-95%
+            
+            occupied_beds = int(total_beds * initial_util)
+            available_beds = total_beds - occupied_beds
+            
+            department_beds[dept] = {
+                'total_beds': total_beds,
+                'occupied_beds': occupied_beds,
+                'available_beds': available_beds
+            }
+        
+        return department_beds
     
     def set_demo_mode(self, demo_mode: bool):
         """Setzt Demo-Modus und beendet aktive Ereignisse wenn ausgeschaltet"""
@@ -172,6 +230,109 @@ class HospitalSimulation:
             
             self.last_update = now
     
+    def _update_department_beds(self, time_factor: float, weekday_factor: float):
+        """
+        Aktualisiert abteilungsbezogene Bettbelegung mit individuellen Fluktuationen.
+        
+        Args:
+            time_factor: Tageszeit-Faktor (0.7-1.2)
+            weekday_factor: Wochentags-Faktor (0.85-1.0)
+        """
+        base_factor = time_factor * weekday_factor
+        ed_factor = self.state['ed_load'] / 100
+        
+        # Basis-Auslastungen pro Abteilung
+        base_utilizations = {
+            'ER': 0.65,
+            'ICU': 0.80,
+            'Surgery': 0.70,
+            'Cardiology': 0.68,
+            'Orthopedics': 0.60,
+            'Urology': 0.55,
+            'Gastroenterology': 0.58,
+            'Geriatrics': 0.55,
+            'SpineCenter': 0.50,
+            'ENT': 0.35
+        }
+        
+        # Fluktuationsbreiten pro Abteilung (unterschiedlich je nach Abteilungstyp)
+        fluctuation_ranges = {
+            'ER': 0.15,        # Notaufnahme: ±15% (hohe Variabilität)
+            'ICU': 0.10,       # Intensivstation: ±10% (moderate Variabilität)
+            'Surgery': 0.12,   # Chirurgie: ±12%
+            'Cardiology': 0.10, # Kardiologie: ±10%
+            'Orthopedics': 0.12, # Orthopädie: ±12%
+            'Urology': 0.10,   # Urologie: ±10%
+            'Gastroenterology': 0.10, # Gastroenterologie: ±10%
+            'Geriatrics': 0.08, # Geriatrie: ±8% (niedrigere Variabilität)
+            'SpineCenter': 0.10, # Wirbelsäulenzentrum: ±10%
+            'ENT': 0.12        # HNO: ±12% (relativ niedrige Basis, aber variabel)
+        }
+        
+        # Tageszeit-Faktoren pro Abteilung (unterschiedliche Muster)
+        # ER und ICU haben stärkere Tageszeit-Abhängigkeit
+        dept_time_factors = {
+            'ER': 1.0 + (base_factor - 1.0) * 1.2,      # Stärkere Tageszeit-Abhängigkeit
+            'ICU': 1.0 + (base_factor - 1.0) * 0.8,     # Moderate Tageszeit-Abhängigkeit
+            'Surgery': 1.0 + (base_factor - 1.0) * 0.6,  # Schwächere Tageszeit-Abhängigkeit
+            'Cardiology': 1.0 + (base_factor - 1.0) * 0.5,
+            'Orthopedics': 1.0 + (base_factor - 1.0) * 0.4,
+            'Urology': 1.0 + (base_factor - 1.0) * 0.3,
+            'Gastroenterology': 1.0 + (base_factor - 1.0) * 0.4,
+            'Geriatrics': 1.0 + (base_factor - 1.0) * 0.2,  # Geringe Tageszeit-Abhängigkeit
+            'SpineCenter': 1.0 + (base_factor - 1.0) * 0.3,
+            'ENT': 1.0 + (base_factor - 1.0) * 0.4
+        }
+        
+        # Aktualisiere jede Abteilung individuell
+        for dept in self.state['department_beds'].keys():
+            dept_data = self.state['department_beds'][dept]
+            total_beds = dept_data['total_beds']
+            current_occupied = dept_data['occupied_beds']
+            current_util = current_occupied / total_beds if total_beds > 0 else 0
+            
+            # Basis-Auslastung für diese Abteilung
+            base_util = base_utilizations.get(dept, 0.60)
+            
+            # Tageszeit-Faktor für diese Abteilung
+            dept_time_factor = dept_time_factors.get(dept, 1.0)
+            
+            # Fluktuationsbreite für diese Abteilung
+            fluctuation = fluctuation_ranges.get(dept, 0.10)
+            
+            # Berechne neue Auslastung mit Variation
+            # Ziel-Auslastung = Basis * Tageszeit-Faktor + zufällige Fluktuation
+            target_util = base_util * dept_time_factor
+            variation = random.uniform(-fluctuation, fluctuation)
+            
+            # Leichte Tendenz zur aktuellen Auslastung (natürliche Trägheit)
+            inertia_factor = 0.7  # 70% behält aktuelle Auslastung, 30% bewegt sich zum Ziel
+            new_util = current_util * inertia_factor + (target_util + variation) * (1 - inertia_factor)
+            
+            # Begrenze auf realistische Werte (20-95%)
+            new_util = max(0.20, min(0.95, new_util))
+            
+            # Leichte Korrelation mit ED Load für ER und ICU
+            if dept == 'ER':
+                # ER korreliert stark mit ED Load
+                ed_influence = (ed_factor - 0.65) * 0.3  # ±10% Einfluss
+                new_util = max(0.20, min(0.95, new_util + ed_influence))
+            elif dept == 'ICU':
+                # ICU korreliert moderat mit ED Load
+                ed_influence = (ed_factor - 0.65) * 0.15  # ±5% Einfluss
+                new_util = max(0.20, min(0.95, new_util + ed_influence))
+            
+            # Berechne neue belegte/freie Betten
+            new_occupied = int(total_beds * new_util)
+            new_available = total_beds - new_occupied
+            
+            # Aktualisiere Abteilungsdaten
+            self.state['department_beds'][dept] = {
+                'total_beds': total_beds,
+                'occupied_beds': new_occupied,
+                'available_beds': new_available
+            }
+    
     def _update_normal_metrics(self, time_factor: float, weekday_factor: float):
         """Aktualisiert normale Metriken basierend auf Tageszeit/Wochentag"""
         base_factor = time_factor * weekday_factor
@@ -184,12 +345,19 @@ class HospitalSimulation:
         # Waiting Count (korreliert mit ED Load)
         ed_factor = self.state['ed_load'] / 100
         base_waiting = 3
-        self.state['waiting_count'] = max(0, int(base_waiting + (ed_factor * 15) + random.uniform(-2, 2)))
+        # Erhöhe Variabilität um sicherzustellen dass Schwellenwerte erreicht werden
+        variation = random.uniform(-3, 4) if self.demo_mode else random.uniform(-2, 3)
+        self.state['waiting_count'] = max(0, int(base_waiting + (ed_factor * 15) + variation))
         
-        # Beds Free (invers korreliert mit ED Load)
-        base_beds = 50
-        beds_factor = 1 - (ed_factor * 0.3)  # Wenn ED hoch, weniger freie Betten
-        self.state['beds_free'] = max(5, int(base_beds * beds_factor * base_factor + random.uniform(-3, 3)))
+        # Aktualisiere abteilungsbezogene Bettbelegung
+        self._update_department_beds(time_factor, weekday_factor)
+        
+        # Beds Free als Summe aller freien Betten aus department_beds
+        total_available = sum(
+            dept_data['available_beds'] 
+            for dept_data in self.state['department_beds'].values()
+        )
+        self.state['beds_free'] = max(0, total_available)
         
         # Staff Load (korreliert mit ED Load)
         self.state['staff_load'] = max(40, min(90, self.state['ed_load'] * 0.9 + random.uniform(-5, 5)))
@@ -207,7 +375,9 @@ class HospitalSimulation:
         # Transporte kommen etwas später als ED Load
         base_transport = 2
         transport_factor = ed_factor * 0.7  # Leicht verzögert
-        self.state['transport_queue'] = max(0, int(base_transport + (transport_factor * 8) + random.uniform(-1, 1)))
+        # Erhöhe Variabilität um sicherzustellen dass Schwellenwerte erreicht werden
+        variation = random.uniform(-1, 3) if self.demo_mode else random.uniform(-1, 2)
+        self.state['transport_queue'] = max(0, int(base_transport + (transport_factor * 8) + variation))
     
     def _check_and_trigger_events(self):
         """Prüft und triggert spezielle Ereignisse (nur im Demo-Modus)"""
@@ -334,8 +504,17 @@ class HospitalSimulation:
                 dept = event['affected_departments'][0] if event['affected_departments'] else 'ER'
                 if dept == 'ER':
                     self.state['ed_load'] = min(95, self.state['ed_load'] * 1.15)
-                elif dept == 'ICU':
-                    self.state['beds_free'] = max(0, int(self.state['beds_free'] * 0.9))
+                elif dept in self.state['department_beds']:
+                    # Reduziere verfügbare Betten in betroffener Abteilung
+                    dept_data = self.state['department_beds'][dept]
+                    dept_data['available_beds'] = max(0, int(dept_data['available_beds'] * 0.9))
+                    dept_data['occupied_beds'] = dept_data['total_beds'] - dept_data['available_beds']
+                    # Aktualisiere globale beds_free
+                    total_available = sum(
+                        d['available_beds'] 
+                        for d in self.state['department_beds'].values()
+                    )
+                    self.state['beds_free'] = max(0, total_available)
             
             elif event['type'] == 'staffing_shortage':
                 # Erhöhe Personal-Auslastung
@@ -348,7 +527,18 @@ class HospitalSimulation:
                 self.state['ed_load'] = min(98, self.state['ed_load'] * manv_factor)
                 self.state['waiting_count'] = int(self.state['waiting_count'] * manv_factor)
                 self.state['staff_load'] = min(95, self.state['staff_load'] * 1.4)
-                self.state['beds_free'] = max(0, int(self.state['beds_free'] * 0.7))  # Viele Betten belegt
+                # Reduziere Betten in betroffenen Abteilungen (ER, ICU, Surgery)
+                for dept in ['ER', 'ICU', 'Surgery']:
+                    if dept in self.state['department_beds']:
+                        dept_data = self.state['department_beds'][dept]
+                        dept_data['available_beds'] = max(0, int(dept_data['available_beds'] * 0.7))
+                        dept_data['occupied_beds'] = dept_data['total_beds'] - dept_data['available_beds']
+                # Aktualisiere globale beds_free
+                total_available = sum(
+                    d['available_beds'] 
+                    for d in self.state['department_beds'].values()
+                )
+                self.state['beds_free'] = max(0, total_available)
         
         # Entferne abgelaufene Ereignisse
         for event in events_to_remove:
@@ -383,37 +573,37 @@ class HospitalSimulation:
         
         # ED Load Alert
         ed_load = self.state.get('ed_load', 0)
-        if ed_load > 85:
+        if ed_load >= 85:
             self.db.create_alert_safe(now, 'high', 'Hohe Notaufnahme-Auslastung', 'ER', 'ed_load', ed_load)
-        elif ed_load > 75:
+        elif ed_load >= 75:
             self.db.create_alert_safe(now, 'medium', 'Erhöhte Notaufnahme-Auslastung', 'ER', 'ed_load', ed_load)
         
         # Waiting Count Alert
         waiting_count = self.state.get('waiting_count', 0)
-        if waiting_count > 15:
+        if waiting_count >= 15:
             self.db.create_alert_safe(now, 'high', f'{waiting_count} wartende Patienten', 'ER', 'waiting_count', waiting_count)
-        elif waiting_count > 10:
+        elif waiting_count >= 10:
             self.db.create_alert_safe(now, 'medium', f'{waiting_count} wartende Patienten', 'ER', 'waiting_count', waiting_count)
         
         # Beds Free Alert
         beds_free = self.state.get('beds_free', 0)
-        if beds_free < 5:
+        if beds_free <= 5:
             self.db.create_alert_safe(now, 'high', f'Nur noch {beds_free} freie Betten', 'ICU', 'beds_free', beds_free)
-        elif beds_free < 10:
+        elif beds_free <= 10:
             self.db.create_alert_safe(now, 'medium', f'Nur noch {beds_free} freie Betten', 'ICU', 'beds_free', beds_free)
         
         # Transport Queue Alert
         transport_queue = self.state.get('transport_queue', 0)
-        if transport_queue > 8:
+        if transport_queue >= 8:
             self.db.create_alert_safe(now, 'high', f'Erhöhte Transport-Warteschlange ({transport_queue})', 'Logistics', 'transport_queue', transport_queue)
-        elif transport_queue > 5:
+        elif transport_queue >= 5:
             self.db.create_alert_safe(now, 'medium', f'Erhöhte Transport-Warteschlange ({transport_queue})', 'Logistics', 'transport_queue', transport_queue)
         
         # Staff Load Alert
         staff_load = self.state.get('staff_load', 0)
-        if staff_load > 90:
+        if staff_load >= 90:
             self.db.create_alert_safe(now, 'high', f'Kritische Personalauslastung ({staff_load:.0f}%)', 'General', 'staff_load', staff_load)
-        elif staff_load > 80:
+        elif staff_load >= 80:
             self.db.create_alert_safe(now, 'medium', f'Erhöhte Personalauslastung ({staff_load:.0f}%)', 'General', 'staff_load', staff_load)
         
         # Inventory Alerts
@@ -531,9 +721,21 @@ class HospitalSimulation:
                 self.state['ed_load'] = min(95, self.state['ed_load'] + random.uniform(1, 3))
                 self.state['waiting_count'] = max(0, int(self.state['waiting_count'] + random.uniform(0.5, 1.5)))
             
-            # Reduziere freie Betten (wenn Patient stationär aufgenommen wird)
+            # Reduziere freie Betten in der spezifischen Abteilung (wenn Patient stationär aufgenommen wird)
             if random.random() < 0.7:  # 70% werden stationär aufgenommen
-                self.state['beds_free'] = max(0, int(self.state['beds_free'] - 1))
+                if department in self.state['department_beds']:
+                    dept_data = self.state['department_beds'][department]
+                    # Reduziere verfügbare Betten, erhöhe belegte Betten
+                    if dept_data['available_beds'] > 0:
+                        dept_data['available_beds'] = max(0, dept_data['available_beds'] - 1)
+                        dept_data['occupied_beds'] = min(dept_data['total_beds'], dept_data['occupied_beds'] + 1)
+                
+                # Aktualisiere globale beds_free als Summe
+                total_available = sum(
+                    dept_data['available_beds'] 
+                    for dept_data in self.state['department_beds'].values()
+                )
+                self.state['beds_free'] = max(0, total_available)
     
     def _simulate_patient_discharges(self, hour: int):
         """Simuliert Patienten-Entlassungen mit Zeitbeschränkungen"""
@@ -578,8 +780,20 @@ class HospitalSimulation:
         # Speichere Event
         self._save_patient_event('discharge', department, 'Entlassung')
         
-        # Erhöhe freie Betten
-        self.state['beds_free'] = min(100, int(self.state['beds_free'] + 1))
+        # Erhöhe freie Betten in der spezifischen Abteilung
+        if department in self.state['department_beds']:
+            dept_data = self.state['department_beds'][department]
+            # Erhöhe verfügbare Betten, reduziere belegte Betten
+            if dept_data['occupied_beds'] > 0:
+                dept_data['occupied_beds'] = max(0, dept_data['occupied_beds'] - 1)
+                dept_data['available_beds'] = min(dept_data['total_beds'], dept_data['available_beds'] + 1)
+        
+        # Aktualisiere globale beds_free als Summe
+        total_available = sum(
+            dept_data['available_beds'] 
+            for dept_data in self.state['department_beds'].values()
+        )
+        self.state['beds_free'] = max(0, total_available)
         
         # Wenn Notaufnahme: Reduziere ED Load
         if department == 'ER':
@@ -711,8 +925,30 @@ class HospitalSimulation:
                 self.state['staff_load'] = min(95, self.state['staff_load'] + 5)
             
             elif effect_name == 'open_overflow_beds':
-                # Erhöhe freie Betten
-                self.state['beds_free'] += 3
+                # Erhöhe freie Betten in Abteilungen mit höchster Auslastung
+                # Sortiere Abteilungen nach Auslastung (höchste zuerst)
+                dept_utilizations = []
+                for dept, dept_data in self.state['department_beds'].items():
+                    util = dept_data['occupied_beds'] / dept_data['total_beds'] if dept_data['total_beds'] > 0 else 0
+                    dept_utilizations.append((dept, util))
+                dept_utilizations.sort(key=lambda x: x[1], reverse=True)
+                
+                # Erhöhe Betten in den 2-3 am stärksten ausgelasteten Abteilungen
+                beds_to_add = 3
+                for dept, _ in dept_utilizations[:3]:
+                    if beds_to_add > 0 and dept in self.state['department_beds']:
+                        dept_data = self.state['department_beds'][dept]
+                        if dept_data['available_beds'] < dept_data['total_beds']:
+                            dept_data['available_beds'] = min(dept_data['total_beds'], dept_data['available_beds'] + 1)
+                            dept_data['occupied_beds'] = dept_data['total_beds'] - dept_data['available_beds']
+                            beds_to_add -= 1
+                
+                # Aktualisiere globale beds_free
+                total_available = sum(
+                    d['available_beds'] 
+                    for d in self.state['department_beds'].values()
+                )
+                self.state['beds_free'] = max(0, total_available)
                 self.state['ed_load'] = max(20, self.state['ed_load'] - 5)
             
             elif effect_name == 'room_allocation':
