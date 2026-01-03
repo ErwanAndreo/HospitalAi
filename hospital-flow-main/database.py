@@ -1281,15 +1281,6 @@ class HospitalDB:
                     
                     result.append(row_dict)
                 
-                # #region agent log
-                import json
-                import os
-                log_path = '/Users/erwan/Programmieren/ItManagementV3/hospital-flow-main/.cursor/debug.log'
-                try:
-                    with open(log_path, 'a') as f:
-                        f.write(json.dumps({"sessionId": "debug-session", "runId": "db-query", "hypothesisId": "B", "location": "database.py:1284", "message": "get_active_alerts returning", "data": {"result_count": len(result), "sample_ids": [r.get('id') for r in result[:3]], "sample_messages": [r.get('message', '')[:30] for r in result[:2]]}, "timestamp": int(time.time() * 1000)}) + '\n')
-                except: pass
-                # #endregion
                 return result
             finally:
                 conn.close()

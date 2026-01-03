@@ -16,7 +16,6 @@ from datetime import datetime, timedelta, timezone
 import time
 import random  # Für zufällige Ereignisse in der Simulation
 from zoneinfo import ZoneInfo
-import hashlib
 
 # Fix sys.path: remove invalid entries and ensure app directory is first
 # This is necessary for proper module resolution in Streamlit/Docker environments
@@ -151,71 +150,6 @@ st.set_page_config(
     layout="wide",  # Weites Layout für mehr Platz
     initial_sidebar_state="expanded"  # Sidebar standardmäßig geöffnet
 )
-
-# ===== AUTHENTIFIZIERUNG =====
-# Einfache aber sichere Authentifizierung mit Streamlit Secrets
-def check_password():
-    """
-    Prüft ob der Benutzer eingeloggt ist oder zeigt Login-Formular.
-    Gibt True zurück wenn authentifiziert, False sonst.
-    """
-    # Prüfe ob bereits authentifiziert
-    if st.session_state.get('authenticated', False):
-        return True
-    
-    # Lade Credentials aus Secrets (für Streamlit Cloud) oder Environment
-    try:
-        # Versuche Secrets zu laden (Streamlit Cloud)
-        if hasattr(st, 'secrets') and 'authentication' in st.secrets:
-            username = st.secrets['authentication']['username']
-            password = st.secrets['authentication']['password']
-        else:
-            # Fallback: Environment Variables oder Defaults (nur für lokale Entwicklung)
-            username = os.getenv('HOSPITALFLOW_USERNAME', 'admin')
-            password = os.getenv('HOSPITALFLOW_PASSWORD', 'admin123')
-    except Exception:
-        # Falls keine Secrets konfiguriert sind, verwende Defaults (nur für lokale Entwicklung)
-        username = os.getenv('HOSPITALFLOW_USERNAME', 'admin')
-        password = os.getenv('HOSPITALFLOW_PASSWORD', 'admin123')
-    
-    # Login-Formular anzeigen
-    st.markdown("""
-    <div style="display: flex; justify-content: center; align-items: center; min-height: 60vh;">
-        <div style="max-width: 400px; width: 100%;">
-    """, unsafe_allow_html=True)
-    
-    st.markdown("""
-    <div style="text-align: center; margin-bottom: 2rem;">
-        <h1 style="font-size: 2.5rem; margin-bottom: 0.5rem;">🏥</h1>
-        <h2 style="color: #4f46e5; margin-bottom: 0.5rem;">HospitalFlow</h2>
-        <p style="color: #6b7280; font-size: 0.9rem;">Bitte melden Sie sich an</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    with st.form("login_form"):
-        input_username = st.text_input("Benutzername", placeholder="Benutzername eingeben", key="login_username")
-        input_password = st.text_input("Passwort", type="password", placeholder="Passwort eingeben", key="login_password")
-        submit_button = st.form_submit_button("Anmelden", use_container_width=True)
-        
-        if submit_button:
-            # Einfache Passwort-Prüfung (Hash-Vergleich für Sicherheit)
-            input_hash = hashlib.sha256(input_password.encode()).hexdigest()
-            stored_hash = hashlib.sha256(password.encode()).hexdigest()
-            
-            if input_username == username and input_hash == stored_hash:
-                st.session_state['authenticated'] = True
-                st.session_state['username'] = input_username
-                st.rerun()
-            else:
-                st.error("❌ Ungültiger Benutzername oder Passwort")
-    
-    st.markdown("</div></div>", unsafe_allow_html=True)
-    
-    return False
-
-# Prüfe Authentifizierung - wenn nicht authentifiziert, stoppe hier
-if not check_password():
-    st.stop()
 
 # ===== SESSION STATE INITIALISIERUNG =====
 # Leistungsoptimierung: Verhindert unnötige Neustarts bei Widget-Interaktionen
@@ -456,17 +390,8 @@ def fetch_background_data(_db, _sim):
         capacity = _db.get_capacity_from_simulation(sim_metrics)
         
         # Speichere in session_state für sofortigen Zugriff
-        alerts_from_batch = batch_data.get('alerts', [])
-        # #region agent log
-        import json
-        log_path = '/Users/erwan/Programmieren/ItManagementV3/hospital-flow-main/.cursor/debug.log'
-        try:
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "background-fetch", "hypothesisId": "A", "location": "app.py:459", "message": "Background data fetch - alerts", "data": {"alert_count": len(alerts_from_batch) if alerts_from_batch else 0, "alerts_is_none": alerts_from_batch is None, "batch_data_keys": list(batch_data.keys()) if batch_data else None}, "timestamp": int(time.time() * 1000)}) + '\n')
-        except: pass
-        # #endregion
         st.session_state.background_data = {
-            'alerts': alerts_from_batch,
+            'alerts': batch_data.get('alerts', []),
             'recommendations': batch_data.get('recommendations', []),
             'transport': batch_data.get('transport', []),
             'inventory': batch_data.get('inventory', []),
@@ -724,18 +649,6 @@ st.sidebar.markdown("")  # Spacing
 if st.sidebar.button("🔄 Daten aktualisieren", use_container_width=True):
     # Cache leeren für alle gecachten Funktionen
     st.cache_data.clear()
-    st.rerun()
-
-st.sidebar.markdown("")  # Spacing
-
-# ===== LOGOUT BUTTON =====
-# Button zum Abmelden
-if st.sidebar.button("🚪 Abmelden", use_container_width=True):
-    # Session State zurücksetzen
-    for key in list(st.session_state.keys()):
-        if key != 'authenticated':  # Behalte authenticated für kurze Zeit
-            del st.session_state[key]
-    st.session_state['authenticated'] = False
     st.rerun()
 
 st.sidebar.markdown("")  # Spacing

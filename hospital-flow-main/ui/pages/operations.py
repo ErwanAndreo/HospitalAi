@@ -103,39 +103,13 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
         alerts_content_placeholder = st.empty()
         
         # Gefilterte Warnungen abrufen - verwende Background-Daten für sofortigen Zugriff
-        # #region agent log
-        import json
-        log_path = '/Users/erwan/Programmieren/ItManagementV3/hospital-flow-main/.cursor/debug.log'
-        try:
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-filter", "hypothesisId": "A", "location": "operations.py:104", "message": "Checking alert sources", "data": {"has_background_data": 'background_data' in st.session_state, "background_data_keys": list(st.session_state.background_data.keys()) if 'background_data' in st.session_state and st.session_state.background_data else None}, "timestamp": int(time.time() * 1000)}) + '\n')
-        except: pass
-        # #endregion
         if 'background_data' in st.session_state and st.session_state.background_data:
             alerts = st.session_state.background_data.get('alerts', [])
-            # #region agent log
-            try:
-                with open(log_path, 'a') as f:
-                    f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-filter", "hypothesisId": "A", "location": "operations.py:108", "message": "Alerts from background_data", "data": {"alert_count": len(alerts) if alerts else 0, "alerts_is_none": alerts is None, "alert_sample": [{"id": a.get('id'), "message": a.get('message')[:50]} for a in (alerts[:2] if alerts else [])]}, "timestamp": int(time.time() * 1000)}) + '\n')
-            except: pass
-            # #endregion
         else:
             alerts = get_cached_alerts() if get_cached_alerts else db.get_active_alerts()
-            # #region agent log
-            try:
-                with open(log_path, 'a') as f:
-                    f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-filter", "hypothesisId": "B", "location": "operations.py:112", "message": "Alerts from fallback source", "data": {"source": "get_cached_alerts" if get_cached_alerts else "db.get_active_alerts()", "alert_count": len(alerts) if alerts else 0, "alerts_is_none": alerts is None}, "timestamp": int(time.time() * 1000)}) + '\n')
-            except: pass
-            # #endregion
         
         # Zeitraum-Filterung manuell anwenden (nur für nicht aufgelöste Warnungen)
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
-        # #region agent log
-        try:
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-filter", "hypothesisId": "C", "location": "operations.py:116", "message": "Before time filtering", "data": {"cutoff_hours": hours, "cutoff_time": cutoff_time.isoformat(), "alert_count_before_time_filter": len(alerts) if alerts else 0, "current_time": datetime.now(timezone.utc).isoformat()}, "timestamp": int(time.time() * 1000)}) + '\n')
-        except: pass
-        # #endregion
         
         # Hilfsfunktion zum Normalisieren von Timestamps
         def normalize_timestamp(ts):
@@ -186,46 +160,15 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                 if ts >= cutoff_time:
                     filtered_by_time.append(a)
         alerts = filtered_by_time
-        # #region agent log
-        try:
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-filter", "hypothesisId": "C", "location": "operations.py:162", "message": "After time filtering", "data": {"alert_count_after_time_filter": len(alerts) if alerts else 0, "timestamp_samples": [{"id": a.get('id'), "timestamp": str(a.get('timestamp'))} for a in (alerts[:2] if alerts else [])]}, "timestamp": int(time.time() * 1000)}) + '\n')
-        except: pass
-        # #endregion
         
         # Filter anwenden
         filtered_alerts = alerts
-        # #region agent log
-        try:
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-filter", "hypothesisId": "D", "location": "operations.py:164", "message": "Before area/severity filtering", "data": {"selected_area": selected_area, "selected_severities": selected_severities, "alert_count_before_filter": len(filtered_alerts) if filtered_alerts else 0}, "timestamp": int(time.time() * 1000)}) + '\n')
-        except: pass
-        # #endregion
         if selected_area is not None:
             filtered_alerts = [a for a in filtered_alerts if a.get('department') == selected_area]
-            # #region agent log
-            try:
-                with open(log_path, 'a') as f:
-                    f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-filter", "hypothesisId": "D", "location": "operations.py:167", "message": "After area filter", "data": {"alert_count_after_area": len(filtered_alerts) if filtered_alerts else 0, "department_samples": [a.get('department') for a in (alerts[:3] if alerts else [])]}, "timestamp": int(time.time() * 1000)}) + '\n')
-            except: pass
-            # #endregion
         if "Alle" not in selected_severities:
             # Deutsche Filterwerte in englische umwandeln für Vergleich mit Alert-Werten
             selected_severities_en = [severity_en_map.get(sev, sev) for sev in selected_severities]
             filtered_alerts = [a for a in filtered_alerts if a['severity'] in selected_severities_en]
-            # #region agent log
-            try:
-                with open(log_path, 'a') as f:
-                    f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-filter", "hypothesisId": "D", "location": "operations.py:171", "message": "After severity filter", "data": {"alert_count_after_severity": len(filtered_alerts) if filtered_alerts else 0, "selected_severities_en": selected_severities_en, "severity_samples": [a.get('severity') for a in (alerts[:3] if alerts else [])]}, "timestamp": int(time.time() * 1000)}) + '\n')
-            except: pass
-            # #endregion
-        
-        # #region agent log
-        try:
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-filter", "hypothesisId": "ALL", "location": "operations.py:175", "message": "Final filtered alerts count", "data": {"final_count": len(filtered_alerts) if filtered_alerts else 0, "will_display": len(filtered_alerts) > 0 if filtered_alerts else False}, "timestamp": int(time.time() * 1000)}) + '\n')
-        except: pass
-        # #endregion
         
         # Spinner entfernen
         spinner_tab1.empty()
