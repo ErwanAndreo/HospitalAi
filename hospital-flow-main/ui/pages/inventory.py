@@ -7,6 +7,8 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import pandas as pd
 import random
+import json
+import os
 from utils import (
     format_time_ago, get_severity_color, get_priority_color, get_risk_color,
     get_status_color, calculate_inventory_status, calculate_capacity_status,
@@ -18,13 +20,62 @@ from utils import (
 from ui.components import render_badge, render_empty_state
 
 
+def _get_simulation_metrics_cached(_sim=None):
+    """Gecachte Simulationsmetriken aus session_state"""
+    if 'cached_sim_metrics' in st.session_state:
+        return st.session_state.cached_sim_metrics
+    if _sim:
+        return _sim.get_current_metrics()
+    return {}
+
+@st.cache_data(ttl=60)
+def _get_inventory_status_cached(_db):
+    """Gecachter Inventar-Status"""
+    return _db.get_inventory_status()
+
+@st.cache_data(ttl=30)
+def _get_inventory_orders_cached(_db):
+    """Gecachte Inventar-Bestellungen"""
+    return _db.get_inventory_orders()
+
 def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get_cached_capacity=None):
     """Rendert die Inventar-Seite"""
-    # Hole Simulationszustand für Aktivitäts-basierte Berechnungen
-    sim_metrics = sim.get_current_metrics()
-    capacity_data = db.get_capacity_overview()
+    # Zeige Erfolgsmeldungen an (falls vorhanden) und lösche Processing-Flags
+    if 'order_success' in st.session_state:
+        st.success(st.session_state.order_success)
+        # Lösche alle Processing-Flags nach erfolgreicher Bestellung
+        keys_to_delete = [key for key in st.session_state.keys() if key.startswith('processing_order_')]
+        
+        for key in keys_to_delete:
+            del st.session_state[key]
+        del st.session_state.order_success
     
-    inventory = db.get_inventory_status()
+    # Zeige Fehlermeldungen an (falls vorhanden) und lösche Processing-Flags
+    if 'order_error' in st.session_state:
+        st.error(st.session_state.order_error)
+        # Lösche alle Processing-Flags nach Fehler
+        keys_to_delete = [key for key in st.session_state.keys() if key.startswith('processing_order_')]
+        
+        for key in keys_to_delete:
+            del st.session_state[key]
+        del st.session_state.order_error
+    
+    # Hole Simulationszustand für Aktivitäts-basierte Berechnungen
+    sim_metrics = _get_simulation_metrics_cached(sim)  # Gecacht
+    # Verwende get_cached_capacity für optimierten Zugriff (aus background_data)
+    if get_cached_capacity:
+        capacity_data = get_cached_capacity()
+    elif 'background_data' in st.session_state and st.session_state.background_data:
+        capacity_data = st.session_state.background_data.get('capacity', [])
+    else:
+        # Fallback: Direkter DB-Zugriff (sollte selten vorkommen)
+        capacity_data = db.get_capacity_overview()
+    
+    # Verwende Background-Daten für sofortigen Zugriff
+    if 'background_data' in st.session_state and st.session_state.background_data:
+        inventory = st.session_state.background_data.get('inventory', [])
+    else:
+        inventory = _get_inventory_status_cached(db)  # Fallback: Gecacht
     
     if inventory:
         # 1. Nachfüllvorschläge
@@ -36,24 +87,14 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
         restock_suggestions = []
         for item in inventory:
             # Berechne Verbrauchsrate basierend auf Historie und Aktivität
-            # Fallback falls Methode nicht verfügbar (z.B. bei gecachtem db-Objekt)
-            if hasattr(db, 'calculate_inventory_consumption_rate'):
-                consumption_rate_data = db.calculate_inventory_consumption_rate(
-                    item_id=item['id'],
-                    sim_state={
-                        'ed_load': sim_metrics.get('ed_load', 65.0),
-                        'beds_occupied': sum([c.get('occupied_beds', 0) for c in capacity_data])
-                    }
-                )
-                daily_consumption_rate = consumption_rate_data['daily_rate']
-            else:
-                # Fallback: Berechne direkt basierend auf Aktivität
-                daily_consumption_rate = calculate_daily_consumption_from_activity(
-                    item=item,
-                    ed_load=sim_metrics.get('ed_load', 65.0),
-                    beds_occupied=sum([c.get('occupied_beds', 0) for c in capacity_data]),
-                    capacity_data=capacity_data
-                )
+            consumption_rate_data = db.calculate_inventory_consumption_rate(
+                item_id=item['id'],
+                sim_state={
+                    'ed_load': sim_metrics.get('ed_load', 65.0),
+                    'beds_occupied': sum([c.get('occupied_beds', 0) for c in capacity_data])
+                }
+            )
+            daily_consumption_rate = consumption_rate_data['daily_rate']
             
             # Berechne Tage bis Engpass
             days_until_stockout = calculate_days_until_stockout(
@@ -68,8 +109,18 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                 days_until_stockout=days_until_stockout
             )
             
-            # Nur Artikel mit hoher oder mittlerer Priorität anzeigen
-            if reorder_suggestion['priority'] in ['hoch', 'mittel']:
+            # Zeige Artikel an, wenn:
+            # 1. Priorität hoch oder mittel ist, ODER
+            # 2. Artikel unter Mindestbestand liegt, ODER
+            # 3. Artikel einen Nachfüllvorschlag hat (auch bei niedriger Priorität, wenn nahe am Mindestbestand)
+            should_show = (
+                reorder_suggestion['priority'] in ['hoch', 'mittel'] or
+                item['current_stock'] < item['min_threshold'] or
+                (reorder_suggestion['suggested_qty'] > 0 and 
+                 item['current_stock'] < item['min_threshold'] * 1.2)  # Innerhalb 20% des Mindestbestands
+            )
+            
+            if should_show:
                 restock_suggestions.append({
                     'item': item,
                     'consumption_rate': daily_consumption_rate,
@@ -134,11 +185,7 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                     button_key = f"order_btn_{item['id']}"
                     
                     # Prüfe ob bereits eine aktive Bestellung existiert
-                    if not hasattr(db, 'get_inventory_orders'):
-                        # Workaround: return empty list if method doesn't exist (container has old code)
-                        active_orders = []
-                    else:
-                        active_orders = db.get_inventory_orders()
+                    active_orders = _get_inventory_orders_cached(db)  # Gecacht
                     has_active_order = any(
                         o['item_id'] == item['id'] and o['status'] in ['ordered', 'in_transit']
                         for o in active_orders
@@ -150,17 +197,52 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                         # Wenn Bestellmenge 0 oder negativ wäre, zeige Info statt Button
                         st.info("Keine Bestellung nötig", icon="ℹ️")
                     else:
-                        if st.button("Bestellung bestätigen", key=button_key, type="primary", use_container_width=True):
-                            try:
-                                order_result = db.create_inventory_order(
-                                    item_id=item['id'],
-                                    quantity=order_quantity,
-                                    department=item.get('department')
-                                )
-                                st.success(f"✅ Bestellung erstellt! {order_quantity} {item['unit']} {item['item_name']} werden zum Hauptlager geliefert und von dort an die Abteilung weitergegeben.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Fehler bei Bestellung: {str(e)}")
+                        # Button zum Bestätigen der Bestellung
+                        # Verwende einen Button-spezifischen Flag, um Endlosschleifen zu vermeiden
+                        processing_key = f"processing_order_{item['id']}"
+                        
+                        # Prüfe ob dieser spezifische Button gerade verarbeitet wird
+                        if processing_key not in st.session_state or not st.session_state[processing_key]:
+                            button_clicked = st.button("Bestellung bestätigen", key=button_key, type="primary", use_container_width=True)
+                            
+                            if button_clicked:
+                                # Setze Flag für diesen Button, um mehrfache Verarbeitung zu verhindern
+                                st.session_state[processing_key] = True
+                                
+                                try:
+                                    # Berechne nächste mögliche Zeit für Transport
+                                    estimated_time_minutes = 60  # Standard Transportzeit für Inventar-Lieferungen
+                                    planned_start_time = sim.calculate_planned_start_time(estimated_time_minutes=estimated_time_minutes)
+                                    
+                                    # Verarbeite Bestellung direkt mit geplanter Startzeit
+                                    order_result = db.create_inventory_order(
+                                        item_id=item['id'],
+                                        quantity=order_quantity,
+                                        department=item.get('department'),
+                                        planned_start_time=planned_start_time,
+                                        estimated_time_minutes=estimated_time_minutes
+                                    )
+                                    
+                                    # Cache für Inventory Orders invalidieren, da neue Bestellung erstellt wurde
+                                    _get_inventory_orders_cached.clear()
+                                    
+                                    # Speichere Erfolgsmeldung für Anzeige nach Rerun
+                                    # WICHTIG: Flag wird NICHT gelöscht, damit beim nächsten Rerun nicht erneut verarbeitet wird
+                                    # Das Flag wird erst gelöscht, nachdem die Nachricht oben angezeigt wurde
+                                    st.session_state.order_success = f"✅ Bestellung erstellt! {order_quantity} {item['unit']} {item['item_name']} werden zum Hauptlager geliefert. Transport wurde automatisch geplant."
+                                    
+                                    # Rerun nur einmal, um die Seite zu aktualisieren
+                                    st.rerun()
+                                except Exception as e:
+                                    # Speichere Fehlermeldung für Anzeige nach Rerun
+                                    # WICHTIG: Flag wird NICHT gelöscht, damit beim nächsten Rerun nicht erneut verarbeitet wird
+                                    st.session_state.order_error = f"Fehler bei Bestellung: {str(e)}"
+                                    
+                                    # Rerun nur einmal, um die Fehlermeldung anzuzeigen
+                                    st.rerun()
+                        else:
+                            # Wenn Processing-Flag gesetzt ist, zeige Button als disabled
+                            st.button("Bestellung bestätigen", key=button_key, type="primary", use_container_width=True, disabled=True)
         else:
             st.markdown(render_empty_state("📦", "Keine Nachfüllvorschläge", "Alle Lagerbestände sind ausreichend"), unsafe_allow_html=True)
         
@@ -169,19 +251,21 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
         st.markdown("#### Aktive Bestellungen")
         st.markdown("")  # Abstand
         
-        if not hasattr(db, 'get_inventory_orders'):
-            # Workaround: return empty list if method doesn't exist (container has old code)
-            active_orders = []
-        else:
-            active_orders = db.get_inventory_orders()
+        active_orders = db.get_inventory_orders()
         active_orders = [o for o in active_orders if o['status'] in ['ordered', 'in_transit']]
         
         if active_orders:
+            # Hole Transport-Daten aus background_data für optimierten Zugriff
+            if 'background_data' in st.session_state and st.session_state.background_data:
+                transports = st.session_state.background_data.get('transport', [])
+            else:
+                # Fallback: Direkter DB-Zugriff
+                transports = db.get_transport_requests()
+            
             for order in active_orders:
                 # Hole Transport-Info
                 transport_info = None
                 if order.get('transport_id'):
-                    transports = db.get_transport_requests()
                     transport_info = next((t for t in transports if t['id'] == order['transport_id']), None)
                 
                 status_map = {
@@ -247,24 +331,14 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
             threshold_percent = (item['min_threshold'] / item['max_capacity']) * 100 if item['max_capacity'] > 0 else 0
             
             # Berechne Verbrauchsrate
-            # Fallback falls Methode nicht verfügbar (z.B. bei gecachtem db-Objekt)
-            if hasattr(db, 'calculate_inventory_consumption_rate'):
-                consumption_rate_data = db.calculate_inventory_consumption_rate(
-                    item_id=item['id'],
-                    sim_state={
-                        'ed_load': sim_metrics.get('ed_load', 65.0),
-                        'beds_occupied': sum([c.get('occupied_beds', 0) for c in capacity_data])
-                    }
-                )
-                daily_consumption_rate = consumption_rate_data['daily_rate']
-            else:
-                # Fallback: Berechne direkt basierend auf Aktivität
-                daily_consumption_rate = calculate_daily_consumption_from_activity(
-                    item=item,
-                    ed_load=sim_metrics.get('ed_load', 65.0),
-                    beds_occupied=sum([c.get('occupied_beds', 0) for c in capacity_data]),
-                    capacity_data=capacity_data
-                )
+            consumption_rate_data = db.calculate_inventory_consumption_rate(
+                item_id=item['id'],
+                sim_state={
+                    'ed_load': sim_metrics.get('ed_load', 65.0),
+                    'beds_occupied': sum([c.get('occupied_beds', 0) for c in capacity_data])
+                }
+            )
+            daily_consumption_rate = consumption_rate_data['daily_rate']
             
             # Berechne Tage bis Engpass (präzise)
             days_until_stockout = calculate_days_until_stockout(
@@ -493,3 +567,4 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                 st.info("Keine Materialien für den Verlauf ausgewählt.")
     else:
         st.info("Keine Bestandsdaten verfügbar")
+

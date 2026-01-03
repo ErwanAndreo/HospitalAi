@@ -1,60 +1,192 @@
 """
 HospitalFlow - Krankenhaus-Betriebsdashboard
 Moderne Streamlit-Anwendung für Krankenhauspersonal mit Live-Metriken, Vorhersagen und Empfehlungen
+
+Diese Datei ist der Haupteinstiegspunkt der Anwendung und enthält:
+- Seitenrouting und Navigation
+- Initialisierung von Datenbank und Simulation
+- Periodische Updates für Simulation, Vorhersagen, Warnungen und Empfehlungen
+- Auto-Refresh-Mechanismus
+- UI-Grundstruktur (Sidebar, Header, Footer)
 """
+import os
+import sys
 import streamlit as st
-import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
-import pandas as pd
-import random
 import time
+import random  # Für zufällige Ereignisse in der Simulation
 from zoneinfo import ZoneInfo
-from db import HospitalDB
-from utils import (
-    format_time_ago, get_severity_color, get_priority_color, get_risk_color,
-    get_status_color, calculate_inventory_status, calculate_capacity_status,
-    format_duration_minutes, get_department_color, get_system_status,
-    get_metric_severity_for_load, get_metric_severity_for_count, get_metric_severity_for_free,
-    get_explanation_score_color
-)
-from simulation import get_simulation
-from ui.styling import apply_custom_styles
-from ui.components import render_badge, render_empty_state
+
+# Fix sys.path: remove invalid entries and ensure app directory is first
+# This is necessary for proper module resolution in Streamlit/Docker environments
+app_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path = [p for p in sys.path if p and p != "app.py" and (os.path.isdir(p) if os.path.exists(p) else True)]
+if app_dir in sys.path:
+    sys.path.remove(app_dir)
+sys.path.insert(0, app_dir)
+
+# Import database with fallback to importlib if standard import fails
+try:
+    from database import HospitalDB
+except (ImportError, ModuleNotFoundError):
+    import importlib.util
+    database_path = os.path.join(app_dir, "database.py")
+    spec = importlib.util.spec_from_file_location("database", database_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load spec from {database_path}")
+    database_module = importlib.util.module_from_spec(spec)
+    sys.modules["database"] = database_module
+    spec.loader.exec_module(database_module)
+    HospitalDB = database_module.HospitalDB
+
+# Helper function to import modules with fallback to importlib
+def safe_import(module_name, class_or_func_name=None):
+    """Import a module with fallback to importlib if standard import fails"""
+    try:
+        if class_or_func_name:
+            module = __import__(module_name, fromlist=[class_or_func_name])
+            return getattr(module, class_or_func_name)
+        else:
+            return __import__(module_name)
+    except (ImportError, ModuleNotFoundError):
+        import importlib.util
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # Handle package imports (e.g., "ui.styling")
+        if "." in module_name:
+            parts = module_name.split(".")
+            module_path = os.path.join(app_dir, *parts[:-1], f"{parts[-1]}.py")
+            actual_module_name = parts[-1]
+        else:
+            module_path = os.path.join(app_dir, f"{module_name}.py")
+            actual_module_name = module_name
+        
+        if not os.path.exists(module_path):
+            raise ImportError(f"Module {module_name} not found at {module_path}")
+        
+        spec = importlib.util.spec_from_file_location(actual_module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load spec from {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        
+        if class_or_func_name:
+            return getattr(module, class_or_func_name)
+        return module
+
+# Import modules with fallback
+HospitalSimulation = safe_import("simulation", "HospitalSimulation")
+PredictionEngine = safe_import("predictions", "PredictionEngine")
+RecommendationEngine = safe_import("recommendations", "RecommendationEngine")
+generate_seed_data = safe_import("seed_data", "generate_seed_data")
+generate_devices_only = safe_import("seed_data", "generate_devices_only")
+
+# Import utils with fallback
+try:
+    from utils import (
+        format_time_ago, get_severity_color, get_priority_color, get_risk_color,
+        get_status_color, calculate_inventory_status, calculate_capacity_status,
+        format_duration_minutes, get_department_color, get_system_status,
+        get_metric_severity_for_load, get_metric_severity_for_count, get_metric_severity_for_free,
+        get_explanation_score_color
+    )
+except (ImportError, ModuleNotFoundError):
+    utils_module = safe_import("utils")
+    format_time_ago = getattr(utils_module, "format_time_ago")
+    get_severity_color = getattr(utils_module, "get_severity_color")
+    get_priority_color = getattr(utils_module, "get_priority_color")
+    get_risk_color = getattr(utils_module, "get_risk_color")
+    get_status_color = getattr(utils_module, "get_status_color")
+    calculate_inventory_status = getattr(utils_module, "calculate_inventory_status")
+    calculate_capacity_status = getattr(utils_module, "calculate_capacity_status")
+    format_duration_minutes = getattr(utils_module, "format_duration_minutes")
+    get_department_color = getattr(utils_module, "get_department_color")
+    get_system_status = getattr(utils_module, "get_system_status")
+    get_metric_severity_for_load = getattr(utils_module, "get_metric_severity_for_load")
+    get_metric_severity_for_count = getattr(utils_module, "get_metric_severity_for_count")
+    get_metric_severity_for_free = getattr(utils_module, "get_metric_severity_for_free")
+    get_explanation_score_color = getattr(utils_module, "get_explanation_score_color")
+
+# Import ui.styling with fallback
+try:
+    from ui.styling import apply_custom_styles
+except (ImportError, ModuleNotFoundError, AttributeError):
+    import importlib.util
+    styling_path = os.path.join(app_dir, "ui", "styling.py")
+    if os.path.exists(styling_path):
+        spec = importlib.util.spec_from_file_location("ui.styling", styling_path)
+        if spec and spec.loader:
+            styling_module = importlib.util.module_from_spec(spec)
+            sys.modules["ui.styling"] = styling_module
+            spec.loader.exec_module(styling_module)
+            apply_custom_styles = getattr(styling_module, "apply_custom_styles")
+        else:
+            raise ImportError(f"Could not load spec from {styling_path}")
+    else:
+        raise ImportError(f"ui/styling.py not found at {styling_path}")
 
 # ===== TIMEZONE CONFIGURATION =====
-# Set your local timezone here (e.g., 'Europe/Berlin', 'Europe/Vienna', 'America/New_York', 'Asia/Tokyo')
-# For Central European Time (CET/CEST), use 'Europe/Berlin' or 'Europe/Zurich'
-LOCAL_TIMEZONE = 'Europe/Berlin'  # Change this to your timezone
+# Zeitzonenkonfiguration: Setze hier deine lokale Zeitzone
+# Beispiele: 'Europe/Berlin', 'Europe/Vienna', 'America/New_York', 'Asia/Tokyo'
+# Für Mitteleuropäische Zeit (CET/CEST) verwende 'Europe/Berlin' oder 'Europe/Zurich'
+LOCAL_TIMEZONE = 'Europe/Berlin'  # Ändere dies auf deine Zeitzone
 
 def get_local_time():
-    """Get current time in configured local timezone"""
+    """
+    Gibt die aktuelle Zeit in der konfigurierten lokalen Zeitzone zurück.
+    
+    Returns:
+        datetime: Aktueller Zeitstempel in lokaler Zeitzone (UTC wird konvertiert)
+    """
     return datetime.now(timezone.utc).astimezone(ZoneInfo(LOCAL_TIMEZONE))
 # ===================================
 
-# Seitenkonfiguration
+# ===== STREAMLIT SEITENKONFIGURATION =====
+# Konfiguriert die grundlegenden Streamlit-Seiteneinstellungen
 st.set_page_config(
     page_title="HospitalFlow",
     page_icon="🏥",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide",  # Weites Layout für mehr Platz
+    initial_sidebar_state="expanded"  # Sidebar standardmäßig geöffnet
 )
 
-# Leistung: Deaktiviere Neustart bei Widget-Interaktion, um Flackern zu vermeiden
+# ===== SESSION STATE INITIALISIERUNG =====
+# Leistungsoptimierung: Verhindert unnötige Neustarts bei Widget-Interaktionen
+# Dies reduziert Flackern und verbessert die User Experience
 if 'rerun_disabled' not in st.session_state:
     st.session_state.rerun_disabled = False
 
-# Styling anwenden
+# ===== STYLING ANWENDEN =====
+# Wende das benutzerdefinierte CSS-Styling an (siehe ui/styling.py)
 apply_custom_styles()
 
-# Datenbank initialisieren (für Leistung gecacht)
-# Temporarily disabled cache to fix container code sync issues
-# @st.cache_resource
-def init_db():
-    from db import HospitalDB
-    return HospitalDB()
-
-db = init_db()
+# ===== DATENBANK INITIALISIERUNG =====
+# Initialisiere echte Datenbank
+if 'db' not in st.session_state:
+    st.session_state.db = HospitalDB()
+    db = st.session_state.db
+    
+    # Prüfe ob Datenbank leer ist und generiere Initialdaten
+    # Verwende connection_context() für effiziente Verbindungswiederverwendung
+    with db.connection_context() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM metrics")
+        metric_count = cursor.fetchone()[0]
+        if metric_count == 0:
+            # Datenbank ist leer - generiere Initialdaten
+            with st.spinner("Initialisiere Datenbank mit Beispieldaten..."):
+                generate_seed_data(db)
+        else:
+            # Prüfe ob Geräte fehlen und generiere sie nachträglich
+            cursor.execute("SELECT COUNT(*) FROM devices")
+            device_count = cursor.fetchone()[0]
+            if device_count == 0:
+                # Geräte fehlen - generiere sie nachträglich
+                with st.spinner("Generiere fehlende Geräte..."):
+                    generate_devices_only(db)
+else:
+    db = st.session_state.db
 
 # Navigation mit Icons
 PAGES = {
@@ -75,7 +207,8 @@ PAGES = {
 system_status, status_color = get_system_status()
 
 
-# HospitalFlow title in sidebar (top left)
+# ===== SIDEBAR UI =====
+# Zeigt den HospitalFlow-Titel in der Sidebar (oben links)
 st.sidebar.markdown("""
 <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.5rem;">
     <span style="font-size: 2rem;">🏥</span>
@@ -83,14 +216,15 @@ st.sidebar.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Sidebar navigation with professional styling
+# Navigation-Header in der Sidebar mit professionellem Styling
 st.sidebar.markdown("""
 <div style="padding: 0.5rem 0 1.5rem 0; border-bottom: 1px solid #e5e7eb; margin-bottom: 1rem;">
     <h3 style="color: #667eea; margin: 0; font-size: 1.125rem; font-weight: 600; letter-spacing: -0.01em;">Navigation</h3>
 </div>
 """, unsafe_allow_html=True)
 
-# Seitenauswahl mit Icons
+# ===== SEITENAUSWAHL =====
+# Radio-Button für die Seitenauswahl (Label verborgen, da der Text in PAGES enthalten ist)
 page_key = st.sidebar.radio(
     "Seite auswählen",
     list(PAGES.keys()),
@@ -98,10 +232,13 @@ page_key = st.sidebar.radio(
     key="nav_radio"
 )
 
-# Seitennamen ohne Icon extrahieren
+# Extrahiere den Seitennamen ohne Icon für das Routing
+# Format: "📊 Dashboard" -> "Dashboard"
 page = page_key.split(" ", 1)[1] if " " in page_key else page_key
 
-# Severity Legend (compact and professional) - unter der Seitenauswahl
+# ===== SCHWEREGRAD-LEGENDE =====
+# Kompakte Legende für die verschiedenen Schweregrade (Hoch/Mittel/Niedrig)
+# Wird in der Sidebar unter der Seitenauswahl angezeigt
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
 <div class="legend" style="margin-bottom: 1rem;">
@@ -121,15 +258,17 @@ st.sidebar.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Demo Mode und Auto-Refresh Variablen definieren (für spätere Verwendung)
-# Diese werden später unten in der Sidebar angezeigt
-demo_mode = st.session_state.get('demo_mode', False)
-auto_refresh = st.session_state.get('auto_refresh', True)
-refresh_interval_key = st.session_state.get('refresh_interval', '30 Sekunden')
+# ===== DEMO-MODUS UND AUTO-REFRESH KONFIGURATION =====
+# Lade Einstellungen aus dem Session State (werden später in der Sidebar angezeigt)
+demo_mode = st.session_state.get('demo_mode', False)  # Demo-Modus: Erhöht Ereignisfrequenz
+auto_refresh = st.session_state.get('auto_refresh', True)  # Auto-Refresh: Automatische Seitenaktualisierung
+refresh_interval_key = st.session_state.get('refresh_interval', '30 Sekunden')  # Aktualisierungsintervall
+# Mapping von Intervall-Strings zu Sekunden
 interval_map = {"10 Sekunden": 10, "30 Sekunden": 30, "60 Sekunden": 60}
 refresh_seconds = interval_map.get(refresh_interval_key, 30)
 
-# Professioneller Seiten-Header
+# ===== SEITEN-HEADER =====
+# Zeigt einen professionellen Header mit Seitentitel und Zeitstempel
 page_timestamp = get_local_time().strftime('%H:%M:%S')
 st.markdown(f"""
 <div class="page-header">
@@ -138,505 +277,363 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Simulation initialisieren (pro Sitzung gecacht)
+# ===== SIMULATION INITIALISIERUNG =====
+# Initialisiere echte Simulation
+# demo_mode wird später aus session_state geladen (siehe unten bei DEMO-MODUS TOGGLE)
+
 if 'simulation' not in st.session_state:
-    st.session_state.simulation = get_simulation()
+    # Initialisiere mit Demo-Modus aus session_state
+    initial_demo_mode = st.session_state.get('demo_mode', False)
+    st.session_state.simulation = HospitalSimulation(db, demo_mode=initial_demo_mode)
 
 sim = st.session_state.simulation
 
-# Simulationsstatus aktualisieren (nur wenn genug Zeit vergangen ist, um Flackern zu vermeiden)
-if 'last_sim_update' not in st.session_state:
-    st.session_state.last_sim_update = datetime.now(timezone.utc)
+# ===== SIMULATION METRIKEN CACHING =====
+# Rufe Simulation-Metriken einmalig ab und cache sie in session_state
+# Verhindert mehrfache Aufrufe von sim.get_current_metrics()
+if 'cached_sim_metrics' not in st.session_state or 'sim_metrics_timestamp' not in st.session_state:
+    st.session_state.cached_sim_metrics = sim.get_current_metrics()
+    st.session_state.sim_metrics_timestamp = time.time()
+else:
+    # Aktualisiere Cache alle 10 Sekunden (Simulation ändert sich häufig)
+    if time.time() - st.session_state.sim_metrics_timestamp > 10:
+        st.session_state.cached_sim_metrics = sim.get_current_metrics()
+        st.session_state.sim_metrics_timestamp = time.time()
 
-time_since_update = (datetime.now(timezone.utc) - st.session_state.last_sim_update).total_seconds()
-if time_since_update > 2:  # Maximal alle 2 Sekunden aktualisieren
-    sim.update()
-    st.session_state.last_sim_update = datetime.now(timezone.utc)
-
-# Auf Auslastungsereignisse prüfen (zufällige Chance, aber nicht zu häufig)
-if 'last_surge_check' not in st.session_state:
-    st.session_state.last_surge_check = datetime.now(timezone.utc)
-
-time_since_last_check = (datetime.now(timezone.utc) - st.session_state.last_surge_check).total_seconds()
-# Im Demo-Modus häufiger prüfen (alle 1 Minute statt 5 Minuten)
-check_interval = 60 if demo_mode else 300
-if time_since_last_check > check_interval:
-    if sim.should_trigger_surge(demo_mode=demo_mode):
-        sim.trigger_surge_event(intensity=random.uniform(0.7, 1.0))
-    st.session_state.last_surge_check = datetime.now(timezone.utc)
-
-# Vorhersagen aktualisieren (regelmäßig, z.B. alle 2-3 Minuten)
-if 'last_prediction_update' not in st.session_state:
-    st.session_state.last_prediction_update = datetime.now(timezone.utc)
-
-time_since_prediction_update = (datetime.now(timezone.utc) - st.session_state.last_prediction_update).total_seconds()
-# Aktualisiere Vorhersagen alle 2-3 Minuten (180 Sekunden)
-prediction_update_interval = 180
-if time_since_prediction_update > prediction_update_interval:
+# ===== MAINTENANCE WINDOWS PROCESSING =====
+# Prüfe und verarbeite Wartungsfenster bei jedem App-Lauf
+# Schließt abgelaufene Wartungen automatisch ab
+if 'last_maintenance_check' not in st.session_state or time.time() - st.session_state.last_maintenance_check > 5:
     try:
-        # Hole aktuellen Simulationszustand
-        sim_metrics = sim.get_current_metrics()
-        sim_trends = sim.trends
-        sim_active_events = sim.active_events
-        
-        # Aktualisiere Vorhersagen
-        db.update_predictions(sim_metrics, sim_trends, sim_active_events)
-        st.session_state.last_prediction_update = datetime.now(timezone.utc)
+        changed_devices = db.check_and_process_maintenance_windows()
+        if changed_devices:
+            # Cache invalidieren wenn Geräte geändert wurden
+            st.cache_data.clear()
+        st.session_state.last_maintenance_check = time.time()
     except Exception as e:
-        # Fehler beim Update ignorieren (nicht kritisch)
+        # Fehler beim Maintenance-Processing ignorieren, um UI nicht zu blockieren
         pass
 
-# Warnungen generieren (regelmäßig, z.B. alle 30-60 Sekunden)
-if 'last_alert_generation' not in st.session_state:
-    st.session_state.last_alert_generation = datetime.now(timezone.utc)
+# ===== KI-ENGINES INITIALISIERUNG =====
+# Initialisiere Vorhersage- und Empfehlungs-Engines
+if 'prediction_engine' not in st.session_state:
+    st.session_state.prediction_engine = PredictionEngine(db)
 
-time_since_alert_generation = (datetime.now(timezone.utc) - st.session_state.last_alert_generation).total_seconds()
-# Generiere Warnungen alle 30-60 Sekunden
-alert_generation_interval = 45
-if time_since_alert_generation > alert_generation_interval:
+if 'recommendation_engine' not in st.session_state:
+    st.session_state.recommendation_engine = RecommendationEngine(db)
+
+# ===== AI-GENERIERUNG (DEFERRED) =====
+# Generiere Vorhersagen und Empfehlungen nur bei Bedarf oder im Hintergrund mit längerem Intervall
+# Dies verbessert die Performance, da AI-Generierung nicht bei jedem Seitenaufruf läuft
+
+if 'last_ai_update' not in st.session_state:
+    st.session_state.last_ai_update = 0
+
+# Prüfe ob AI-Generierung benötigt wird (nur auf relevanten Seiten)
+needs_ai = page in ["Vorhersagen", "Empfehlungen", "Dashboard", "Betrieb"]
+
+current_time = time.time()
+# Längeres Intervall: 300 Sekunden (5 Minuten) statt 60 Sekunden
+# Oder sofort wenn auf relevanter Seite und letztes Update > 60 Sekunden
+ai_update_interval = 300  # 5 Minuten für Hintergrund-Updates
+if needs_ai:
+    ai_update_interval = 60  # 1 Minute wenn auf relevanter Seite
+
+if current_time - st.session_state.last_ai_update > ai_update_interval:
+    # Generiere Vorhersagen nur wenn benötigt
+    if needs_ai or page == "Vorhersagen":
+        try:
+            st.session_state.prediction_engine.generate_predictions([5, 10, 15])
+        except Exception as e:
+            pass  # Fehler ignorieren, um UI nicht zu blockieren
+    
+    # Generiere Empfehlungen nur wenn benötigt
+    if needs_ai or page == "Empfehlungen":
+        try:
+            # Verwende gecachte Simulation-Metriken falls verfügbar
+            if 'cached_sim_metrics' in st.session_state:
+                sim_metrics = st.session_state.cached_sim_metrics
+            else:
+                sim_metrics = sim.get_current_metrics()
+                st.session_state.cached_sim_metrics = sim_metrics
+            st.session_state.recommendation_engine.generate_recommendations(sim_metrics)
+        except Exception as e:
+            pass  # Fehler ignorieren
+    
+    st.session_state.last_ai_update = current_time
+
+# ===== BACKGROUND DATA PRE-FETCHING =====
+# Pre-fetch alle wichtigen Daten im Hintergrund für sofortige Verfügbarkeit
+# Daten werden in st.session_state gespeichert und periodisch aktualisiert
+
+def fetch_background_data(_db, _sim):
+    """
+    Lädt alle wichtigen Daten im Hintergrund für alle Tabs.
+    Wird periodisch aufgerufen um Daten aktuell zu halten.
+    
+    Args:
+        _db: HospitalDB-Instanz
+        _sim: HospitalSimulation-Instanz
+    """
     try:
-        # Hole aktuellen Simulationszustand
-        sim_metrics = sim.get_current_metrics()
-        sim_trends = sim.trends
+        # Verwende erweiterte Batch-Query für alle Daten (alerts, recommendations, transport, inventory, devices, predictions, metrics_recent, audit_log)
+        batch_data = _db.get_dashboard_data_batch()
         
-        # Generiere Warnungen basierend auf aktuellen Daten
-        db.generate_alerts(sim_metrics, sim_trends)
-        st.session_state.last_alert_generation = datetime.now(timezone.utc)
+        # Hole Simulationsmetriken (verwende gecachte falls verfügbar, sonst hole neu)
+        if 'cached_sim_metrics' in st.session_state:
+            sim_metrics = st.session_state.cached_sim_metrics
+        else:
+            sim_metrics = _sim.get_current_metrics()
+            st.session_state.cached_sim_metrics = sim_metrics
+        
+        # Berechne capacity aus Simulation (keine DB-Query nötig)
+        capacity = _db.get_capacity_from_simulation(sim_metrics)
+        
+        # Speichere in session_state für sofortigen Zugriff
+        st.session_state.background_data = {
+            'alerts': batch_data.get('alerts', []),
+            'recommendations': batch_data.get('recommendations', []),
+            'transport': batch_data.get('transport', []),
+            'inventory': batch_data.get('inventory', []),
+            'devices': batch_data.get('devices', []),
+            'predictions': batch_data.get('predictions', []),
+            'capacity': capacity,  # Aus Simulation berechnet (keine DB-Query)
+            'metrics_recent': batch_data.get('metrics_recent', []),  # Aus Batch-Query
+            'audit_log': batch_data.get('audit_log', []),  # Aus Batch-Query
+            'timestamp': time.time()
+        }
     except Exception as e:
-        # Fehler beim Update ignorieren (nicht kritisch)
+        # Bei Fehler: Verwende leere Datenstruktur
+        if 'background_data' not in st.session_state:
+            st.session_state.background_data = {
+                'alerts': [],
+                'recommendations': [],
+                'transport': [],
+                'inventory': [],
+                'devices': [],
+                'predictions': [],
+                'capacity': [],
+                'metrics_recent': [],
+                'audit_log': [],
+                'timestamp': time.time()
+            }
+
+# Initialisiere Background-Daten beim ersten Start
+if 'background_data' not in st.session_state:
+    fetch_background_data(db, sim)
+    st.session_state.background_data_timestamp = time.time()
+
+# Update Background-Daten periodisch (alle 30 Sekunden)
+background_update_interval = 30
+if 'background_data_timestamp' not in st.session_state:
+    st.session_state.background_data_timestamp = 0
+
+if time.time() - st.session_state.background_data_timestamp > background_update_interval:
+    # Update im Hintergrund (nicht-blockierend)
+    try:
+        fetch_background_data(db, sim)
+        st.session_state.background_data_timestamp = time.time()
+    except Exception as e:
+        # Fehler ignorieren, um UI nicht zu blockieren
         pass
 
-# Empfehlungen generieren (regelmäßig, z.B. alle 60-90 Sekunden)
-if 'last_recommendation_generation' not in st.session_state:
-    st.session_state.last_recommendation_generation = datetime.now(timezone.utc)
+# ===== DATENABRUF FUNKTIONEN =====
+# Funktionen für häufige Datenabrufe mit Caching für bessere Performance
+# Verwenden jetzt Background-Daten aus session_state für sofortigen Zugriff
 
-time_since_recommendation_generation = (datetime.now(timezone.utc) - st.session_state.last_recommendation_generation).total_seconds()
-# Generiere Empfehlungen alle 60-90 Sekunden
-recommendation_generation_interval = 75
-if time_since_recommendation_generation > recommendation_generation_interval:
+def get_cached_alerts(_db=None):
+    """
+    Gibt aktive Warnungen zurück (aus Background-Daten oder direkt aus DB).
+    
+    Args:
+        _db: HospitalDB-Instanz (optional, für Fallback)
+    
+    Returns:
+        List[Dict]: Liste von aktiven Warnungen
+    """
+    # Verwende Background-Daten falls verfügbar
+    if 'background_data' in st.session_state and st.session_state.background_data:
+        return st.session_state.background_data.get('alerts', [])
+    # Fallback: Direkt aus DB
+    if _db:
+        return _db.get_active_alerts()
+    return []
+
+def get_cached_recommendations(_db=None):
+    """
+    Gibt ausstehende Empfehlungen zurück (aus Background-Daten oder direkt aus DB).
+    
+    Args:
+        _db: HospitalDB-Instanz (optional, für Fallback)
+    
+    Returns:
+        List[Dict]: Liste von ausstehenden Empfehlungen
+    """
+    # Verwende Background-Daten falls verfügbar
+    if 'background_data' in st.session_state and st.session_state.background_data:
+        return st.session_state.background_data.get('recommendations', [])
+    # Fallback: Direkt aus DB
+    if _db:
+        return _db.get_pending_recommendations()
+    return []
+
+def get_cached_capacity(_db=None):
+    """
+    Gibt Kapazitätsübersicht zurück (aus Background-Daten oder direkt aus DB).
+    
+    Args:
+        _db: HospitalDB-Instanz (optional, für Fallback)
+    
+    Returns:
+        List[Dict]: Liste von Kapazitätsdaten pro Abteilung
+    """
+    # Verwende Background-Daten falls verfügbar
+    if 'background_data' in st.session_state and st.session_state.background_data:
+        return st.session_state.background_data.get('capacity', [])
+    # Fallback: Direkt aus DB
+    if _db:
+        return _db.get_capacity_overview()
+    return []
+
+def get_cached_simulation_metrics(_sim=None):
+    """
+    Gibt aktuelle Simulationsmetriken zurück (aus session_state Cache).
+    Verwendet gecachte Metriken um mehrfache Aufrufe zu vermeiden.
+    
+    Args:
+        _sim: HospitalSimulation-Instanz (wird ignoriert, verwendet session_state)
+    
+    Returns:
+        Dict: Aktuelle Simulationsmetriken
+    """
+    # Verwende gecachte Metriken aus session_state
+    if 'cached_sim_metrics' in st.session_state:
+        return st.session_state.cached_sim_metrics
+    # Fallback falls Cache nicht existiert
+    if _sim:
+        return _sim.get_current_metrics()
+    return {}
+
+# Wrapper-Funktionen für Kompatibilität mit bestehenden Seiten-Aufrufen
+def get_cached_alerts_wrapper():
+    """Wrapper für get_cached_alerts() ohne Parameter"""
+    return get_cached_alerts(db)
+
+def get_cached_recommendations_wrapper():
+    """Wrapper für get_cached_recommendations() ohne Parameter"""
+    return get_cached_recommendations(db)
+
+def get_cached_capacity_wrapper():
+    """Wrapper für get_cached_capacity() ohne Parameter"""
+    return get_cached_capacity(db)
+
+# ===== LAZY LOADING FÜR SEITENMODULE =====
+# Lade Seitenmodule nur bei Bedarf für bessere Performance
+# Verhindert unnötige Imports beim Start
+
+# Mapping von Seitennamen zu Modulnamen
+PAGE_MODULE_MAP = {
+    "Dashboard": "dashboard",
+    "Betrieb": "operations",
+    "Live-Metriken": "metrics",
+    "Vorhersagen": "predictions",
+    "Transport": "transport",
+    "Inventar": "inventory",
+    "Gerätewartung": "devices",
+    "Entlassungsplanung": "discharge_planning",
+    "Kapazitätsübersicht": "capacity",
+    "Dienstplan": "dienstplan"
+}
+
+def load_page_module(page_name: str):
+    """
+    Lädt ein Seitenmodul lazy (nur bei Bedarf).
+    
+    Args:
+        page_name: Name der Seite (z.B. "Dashboard")
+    
+    Returns:
+        Modul-Objekt oder None
+    """
+    if page_name not in PAGE_MODULE_MAP:
+        return None
+    
+    mod_name = PAGE_MODULE_MAP[page_name]
+    module_key = f"page_module_{mod_name}"
+    
+    # Prüfe ob Modul bereits geladen ist
+    if module_key in st.session_state:
+        return st.session_state[module_key]
+    
+    # Lade Modul lazy
     try:
-        # Hole aktuellen Simulationszustand
-        sim_metrics = sim.get_current_metrics()
-        sim_trends = sim.trends
+        # Versuche Standard-Import
+        module = __import__(f"ui.pages.{mod_name}", fromlist=[mod_name])
+        page_module = getattr(module, mod_name) if hasattr(module, mod_name) else module
+    except (ImportError, ModuleNotFoundError, AttributeError):
+        # Fallback: importlib
+        import importlib.util
+        module_path = os.path.join(app_dir, 'ui', 'pages', f'{mod_name}.py')
+        if not os.path.exists(module_path):
+            return None
         
-        # Generiere Empfehlungen basierend auf aktuellen Daten
-        db.generate_recommendations(sim_metrics, sim_trends)
-        st.session_state.last_recommendation_generation = datetime.now(timezone.utc)
-    except Exception as e:
-        # Fehler beim Update ignorieren (nicht kritisch)
-        pass
+        spec = importlib.util.spec_from_file_location(f"ui.pages.{mod_name}", module_path)
+        if spec is None or spec.loader is None:
+            return None
+        
+        page_module = importlib.util.module_from_spec(spec)
+        sys.modules[f"ui.pages.{mod_name}"] = page_module
+        spec.loader.exec_module(page_module)
+    
+    # Cache Modul in session_state
+    st.session_state[module_key] = page_module
+    return page_module
 
-# Operationen-Simulation (regelmäßig, z.B. alle 5-10 Minuten)
-if 'last_operations_simulation' not in st.session_state:
-    st.session_state.last_operations_simulation = datetime.now(timezone.utc)
+# ===== SEITEN-ROUTING =====
+# Routet zur entsprechenden Seite basierend auf der Benutzerauswahl
+# Jede Seite hat eine render()-Funktion, die die Datenbank- und Simulations-Instanzen erhält
+page_module = load_page_module(page)
 
-time_since_ops_sim = (datetime.now(timezone.utc) - st.session_state.last_operations_simulation).total_seconds()
-# Simuliere Operationen alle 5-10 Minuten (300 Sekunden)
-operations_simulation_interval = 300
-if time_since_ops_sim > operations_simulation_interval:
-    try:
-        from utils import calculate_operation_consumption
-        
-        # Generiere neue Operationen
-        new_operations = sim.simulate_operations()
-        
-        # Speichere neue Operationen in Datenbank
-        for op in new_operations:
-            db.record_operation(
-                operation_type=op['operation_type'],
-                department=op['department'],
-                status=op['status'],
-                duration_minutes=op['duration_minutes'],
-                planned_start_time=op['planned_start_time']
-            )
-        
-        # Aktualisiere Status bestehender Operationen (geplant → laufend → abgeschlossen)
-        # Hole Operationen mit Status "geplant" oder "laufend"
-        planned_ops = db.get_recent_operations(hours=24, status='geplant')
-        running_ops = db.get_recent_operations(hours=24, status='laufend')
-        
-        # Prüfe geplante Operationen: Starte sie, wenn geplante Startzeit erreicht
-        for op in planned_ops:
-            if op.get('planned_start_time'):
-                planned_start = op['planned_start_time']
-                if isinstance(planned_start, str):
-                    try:
-                        planned_start = datetime.fromisoformat(planned_start.replace('Z', '+00:00'))
-                    except:
-                        planned_start = datetime.strptime(planned_start, '%Y-%m-%d %H:%M:%S.%f')
-                elif not isinstance(planned_start, datetime):
-                    continue
-                # Entferne timezone info für Vergleich
-                if planned_start.tzinfo:
-                    planned_start = planned_start.replace(tzinfo=None)
-                now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
-                if planned_start <= now_naive:
-                    # Starte Operation
-                    conn = db.get_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        UPDATE operations 
-                        SET status = 'laufend', start_time = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                    """, (op['id'],))
-                    conn.commit()
-                    conn.close()
-        
-        # Prüfe laufende Operationen: Schließe sie ab, wenn Dauer erreicht
-        for op in running_ops:
-            if op.get('start_time') and op.get('duration_minutes'):
-                start_time = op['start_time']
-                if isinstance(start_time, str):
-                    try:
-                        start_time = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                    except:
-                        try:
-                            start_time = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S.%f')
-                        except:
-                            start_time = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
-                elif not isinstance(start_time, datetime):
-                    continue
-                # Entferne timezone info für Vergleich
-                if start_time.tzinfo:
-                    start_time = start_time.replace(tzinfo=None)
-                duration_minutes = op['duration_minutes']
-                end_time = start_time + timedelta(minutes=duration_minutes)
-                now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
-                if end_time <= now_naive:
-                    # Schließe Operation ab und berechne Materialverbrauch
-                    conn = db.get_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        UPDATE operations 
-                        SET status = 'abgeschlossen', end_time = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                    """, (op['id'],))
-                    conn.commit()
-                    conn.close()
-                    
-                    # Berechne Materialverbrauch für diese Operation
-                    consumption_map = calculate_operation_consumption(
-                        operation_type=op['operation_type'],
-                        department=op['department'],
-                        duration_minutes=duration_minutes
-                    )
-                    
-                    # Aktualisiere Inventar-Bestand
-                    db.update_inventory_from_operation(
-                        operation_type=op['operation_type'],
-                        department=op['department'],
-                        consumption_map=consumption_map
-                    )
-        
-        st.session_state.last_operations_simulation = datetime.now(timezone.utc)
-    except Exception as e:
-        # Fehler beim Update ignorieren (nicht kritisch)
-        pass
+if page_module:
+    if page == "Dashboard":
+        page_module.render(db, sim, get_cached_alerts_wrapper, get_cached_recommendations_wrapper, get_cached_capacity_wrapper)
+    elif page == "Betrieb":
+        page_module.render(db, sim, get_cached_alerts_wrapper, get_cached_recommendations_wrapper, get_cached_capacity_wrapper)
+    elif page in ["Live-Metriken", "Vorhersagen", "Transport", "Inventar", "Gerätewartung", "Entlassungsplanung", "Kapazitätsübersicht", "Dienstplan"]:
+        page_module.render(db, sim)
+else:
+    st.error(f"Seitenmodul für '{page}' konnte nicht geladen werden.")
 
-# Entlassungen durchführen (regelmäßig, z.B. alle 3-5 Minuten)
-if 'last_discharge_processing' not in st.session_state:
-    st.session_state.last_discharge_processing = datetime.now(timezone.utc)
+# ===== SIDEBAR-FOOTER UND EINSTELLUNGEN =====
+# Zeigt Einstellungen und Footer-Informationen in der Sidebar
 
-time_since_discharge_processing = (datetime.now(timezone.utc) - st.session_state.last_discharge_processing).total_seconds()
-# Verarbeite Entlassungen alle 3-5 Minuten (240 Sekunden)
-discharge_processing_interval = 240
-if time_since_discharge_processing > discharge_processing_interval:
-    try:
-        # Hole Entlassungsplanungsdaten aus der Datenbank
-        discharge_data = db.get_discharge_planning()
-        
-        if discharge_data:
-            # Aggregiere alle entlassungsbereiten Patienten über alle Abteilungen
-            # Filtere ER-Abteilung aus (Notaufnahme-Patienten werden nicht automatisch entlassen)
-            total_ready_for_discharge = sum([
-                dept.get('ready_for_discharge_count', 0) 
-                for dept in discharge_data
-                if dept.get('department', '').upper() not in ['ER', 'ED']  # Notaufnahme ausschließen
-            ])
-            
-            # Führe Entlassungen durch (nicht alle auf einmal, sondern mit gewisser Wahrscheinlichkeit/Teilmenge)
-            # Realistisch: Nicht alle entlassungsbereiten Patienten werden sofort entlassen
-            # Verwendet eine gewisse Rate (z.B. 30-70% der entlassungsbereiten Patienten pro Zyklus)
-            if total_ready_for_discharge > 0:
-                # Hole aktuelle lokale Zeit für zeitbasierte Entlassungsrate
-                current_local_time = get_local_time()
-                current_hour = current_local_time.hour
-                
-                # Nach 19:00 Uhr: sehr seltene Entlassungen (5-10% Rate)
-                if current_hour >= 19:
-                    discharge_rate = random.uniform(0.05, 0.10)  # 5-10% statt 40-60%
-                else:
-                    discharge_rate = random.uniform(0.4, 0.6)  # Normale Rate
-                
-                # Berechne Anzahl zu entlassender Patienten
-                # Basis: Entlassungsrate der entlassungsbereiten Patienten, aber mindestens 1 wenn > 0
-                patients_to_discharge = max(1, int(total_ready_for_discharge * discharge_rate))
-                
-                # Führe Entlassungen in der Simulation durch
-                sim.apply_discharge_event(count=patients_to_discharge)
-        
-        st.session_state.last_discharge_processing = datetime.now(timezone.utc)
-    except Exception as e:
-        # Fehler beim Update ignorieren (nicht kritisch)
-        pass
-
-# Inventar-Verbrauch aufzeichnen (regelmäßig, z.B. alle 5-10 Minuten)
-if 'last_consumption_update' not in st.session_state:
-    st.session_state.last_consumption_update = datetime.now(timezone.utc)
-
-time_since_consumption_update = (datetime.now(timezone.utc) - st.session_state.last_consumption_update).total_seconds()
-# Aktualisiere Verbrauch alle 5-10 Minuten (300 Sekunden)
-consumption_update_interval = 300
-if time_since_consumption_update > consumption_update_interval:
-    try:
-        from utils import calculate_daily_consumption_from_activity
-        
-        # Hole aktuellen Simulationszustand
-        sim_metrics = sim.get_current_metrics()
-        capacity_data = db.get_capacity_overview()
-        
-        # Berechne belegte Betten
-        beds_occupied = sum([c.get('occupied_beds', 0) for c in capacity_data])
-        
-        # Hole Operationen-Verbrauch pro Abteilung (letzte 24 Stunden, für Tagesdurchschnitt)
-        operations_consumption_by_dept = db.get_operations_consumption(hours=24)
-        
-        # Hole alle Inventar-Artikel
-        inventory = db.get_inventory_status()
-        
-        # Für jeden Artikel: Berechne und speichere Verbrauch
-        for item in inventory:
-            department = item.get('department', '')
-            
-            # Anzahl Operationen in dieser Abteilung (für Verbrauchsberechnung)
-            operations_count = operations_consumption_by_dept.get(department, 0)
-            # Umrechnung: Anzahl Operationen in 24h → durchschnittlicher Tagesverbrauch
-            # (wir speichern alle 5-10 Minuten, daher teilen wir durch Anzahl Intervalle pro Tag)
-            daily_operations_count = operations_count / (24 * 60 / consumption_update_interval)
-            
-            # Berechne Verbrauch basierend auf Aktivität (inkl. Operationen)
-            daily_consumption = calculate_daily_consumption_from_activity(
-                item=item,
-                ed_load=sim_metrics.get('ed_load', 65.0),
-                beds_occupied=beds_occupied,
-                capacity_data=capacity_data,
-                operations_count=daily_operations_count
-            )
-            
-            # Berechne Aktivitätsfaktor (kombiniert ED Load und Bettenauslastung)
-            ed_factor = 0.5 + (sim_metrics.get('ed_load', 65.0) / 100.0) * 1.0
-            beds_utilization = (beds_occupied / max(1, sum([c.get('total_beds', 0) for c in capacity_data]))) * 100
-            beds_factor = 0.7 + (beds_utilization / 100.0) * 0.6
-            activity_factor = (ed_factor + beds_factor) / 2.0
-            
-            # Speichere Verbrauchseintrag (täglicher Verbrauch)
-            # Da wir alle 5-10 Minuten aufzeichnen, speichern wir den geschätzten täglichen Verbrauch
-            db.record_inventory_consumption(
-                item_id=item['id'],
-                item_name=item['item_name'],
-                consumption_amount=daily_consumption,
-                department=item.get('department'),
-                ed_load=sim_metrics.get('ed_load', 65.0),
-                beds_occupied=beds_occupied,
-                activity_factor=activity_factor
-            )
-        
-        st.session_state.last_consumption_update = datetime.now(timezone.utc)
-    except Exception as e:
-        # Fehler beim Update ignorieren (nicht kritisch)
-        pass
-
-# Externe Transporte-Simulation (zur Apotheke oder ins Heimatland, z.B. alle 8-12 Minuten)
-if 'last_external_transport_simulation' not in st.session_state:
-    st.session_state.last_external_transport_simulation = datetime.now(timezone.utc)
-
-time_since_external_transport = (datetime.now(timezone.utc) - st.session_state.last_external_transport_simulation).total_seconds()
-# Simuliere externe Transporte alle 8-12 Minuten (480-720 Sekunden)
-external_transport_interval = random.randint(480, 720)
-if time_since_external_transport > external_transport_interval:
-    try:
-        # Generiere neue externe Transporte
-        new_external_transports = sim.simulate_external_transports()
-        
-        # Erstelle Transporte in Datenbank
-        for transport in new_external_transports:
-            db.create_patient_transport(
-                from_location=transport['from_location'],
-                to_location=transport['to_location'],
-                priority=transport['priority']
-            )
-        
-        st.session_state.last_external_transport_simulation = datetime.now(timezone.utc)
-    except Exception as e:
-        # Fehler beim Update ignorieren (nicht kritisch)
-        pass
-
-# Transport-Verarbeitung (regelmäßig, z.B. alle 30-60 Sekunden)
-if 'last_transport_update' not in st.session_state:
-    st.session_state.last_transport_update = datetime.now(timezone.utc)
-
-time_since_transport_update = (datetime.now(timezone.utc) - st.session_state.last_transport_update).total_seconds()
-# Aktualisiere Transporte alle 30-60 Sekunden (45 Sekunden)
-transport_update_interval = 45
-if time_since_transport_update > transport_update_interval:
-    try:
-        import random
-        pending_transports = db.get_pending_transports()
-        now = datetime.now(timezone.utc)
-        
-        for transport in pending_transports:
-            transport_id = transport['id']
-            status = transport['status']
-            
-            # Starte pending Transporte
-            if status in ['pending', 'ausstehend']:
-                # Berechne Basis-Zeit
-                estimated_time = transport.get('estimated_time_minutes', 15)
-                
-                # Füge zufällige Verzögerung hinzu (Stau-Wahrscheinlichkeit: 15%)
-                delay_minutes = 0
-                if random.random() < 0.15:  # 15% Wahrscheinlichkeit für Stau
-                    delay_minutes = random.randint(5, 15)
-                
-                total_time = estimated_time + delay_minutes
-                start_time = now
-                expected_completion = start_time + timedelta(minutes=total_time)
-                
-                # Aktualisiere Transport
-                db.update_transport_status(
-                    transport_id=transport_id,
-                    status='in_progress',
-                    start_time=start_time,
-                    expected_completion_time=expected_completion,
-                    delay_minutes=delay_minutes if delay_minutes > 0 else None
-                )
-                
-                # Aktualisiere Bestellungs-Status wenn Inventar-Transport
-                if transport.get('related_entity_type') == 'inventory_order':
-                    order_id = transport.get('related_entity_id')
-                    if order_id:
-                        conn = db.get_connection()
-                        cursor = conn.cursor()
-                        cursor.execute("""
-                            UPDATE inventory_orders SET status = 'in_transit' WHERE id = ?
-                        """, (order_id,))
-                        conn.commit()
-                        conn.close()
-            
-            # Prüfe in_progress Transporte auf Abschluss
-            elif status in ['in_progress', 'in_bearbeitung']:
-                expected_completion = transport.get('expected_completion_time')
-                
-                if expected_completion:
-                    # Konvertiere zu datetime falls String
-                    if isinstance(expected_completion, str):
-                        try:
-                            expected_completion = datetime.fromisoformat(expected_completion.replace('Z', '+00:00'))
-                        except:
-                            # Fallback: verwende estimated_time_minutes
-                            estimated_time = transport.get('estimated_time_minutes', 15)
-                            start_time_str = transport.get('start_time')
-                            if start_time_str:
-                                try:
-                                    if isinstance(start_time_str, str):
-                                        start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                                    else:
-                                        start_time = start_time_str
-                                    expected_completion = start_time + timedelta(minutes=estimated_time)
-                                except:
-                                    continue
-                            else:
-                                continue
-                    
-                    # Prüfe ob Zeit erreicht
-                    if now >= expected_completion:
-                        # Berechne tatsächliche Zeit
-                        start_time_str = transport.get('start_time')
-                        if start_time_str:
-                            try:
-                                if isinstance(start_time_str, str):
-                                    start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                                else:
-                                    start_time = start_time_str
-                                actual_time = int((now - start_time).total_seconds() / 60)
-                            except:
-                                actual_time = transport.get('estimated_time_minutes', 15)
-                        else:
-                            actual_time = transport.get('estimated_time_minutes', 15)
-                        
-                        # Transport abschließen
-                        db.update_transport_status(
-                            transport_id=transport_id,
-                            status='completed',
-                            actual_time_minutes=actual_time
-                        )
-                        
-                        # Bei Inventar-Transport: Bestand erhöhen
-                        if transport.get('related_entity_type') == 'inventory_order':
-                            db.complete_inventory_transport(transport_id)
-                        
-                        # Bei Patiententransfer: Kapazität aktualisieren (optional, kann später erweitert werden)
-                        # Für jetzt: nur Transport abschließen
-        
-        st.session_state.last_transport_update = datetime.now(timezone.utc)
-    except Exception as e:
-        # Fehler beim Update ignorieren (nicht kritisch)
-        pass
-
-# Datenabruf cachen, um Flackern zu vermeiden
-@st.cache_data(ttl=2)  # Cache für 2 Sekunden für schnellere Updates
-def get_cached_alerts():
-    return db.get_active_alerts()
-
-@st.cache_data(ttl=2)
-def get_cached_recommendations():
-    return db.get_pending_recommendations()
-
-@st.cache_data(ttl=2)
-def get_cached_capacity():
-    return db.get_capacity_overview()
-
-# Seitenmodule importieren
-from ui.pages import dashboard, operations, metrics, predictions, transport, inventory, devices, discharge_planning, capacity, dienstplan
-
-# Seiteninhalt - Routing zu Seitenmodulen
-if page == "Dashboard":
-    dashboard.render(db, sim, get_cached_alerts, get_cached_recommendations, get_cached_capacity)
-elif page == "Betrieb":
-    operations.render(db, sim, get_cached_alerts, get_cached_recommendations, get_cached_capacity)
-elif page == "Live-Metriken":
-    metrics.render(db, sim)
-elif page == "Vorhersagen":
-    predictions.render(db, sim)
-elif page == "Transport":
-    transport.render(db, sim)
-elif page == "Inventar":
-    inventory.render(db, sim)
-elif page == "Gerätewartung":
-    devices.render(db, sim)
-elif page == "Entlassungsplanung":
-    discharge_planning.render(db, sim)
-elif page == "Kapazitätsübersicht":
-    capacity.render(db, sim)
-elif page == "Dienstplan":
-    dienstplan.render(db, sim)
-
-# Sidebar-Footer
 st.sidebar.markdown("---")
 st.sidebar.markdown("")  # Spacing
 
-# Demo Mode toggle (in sidebar - above refresh button)
+# ===== DEMO-MODUS TOGGLE =====
+# Ermöglicht es Benutzern, den Demo-Modus zu aktivieren
+# Demo-Modus erhöht die Ereignisfrequenz für bessere Demonstration
 demo_mode_new = st.sidebar.toggle("🎬 Demo-Modus", value=demo_mode, help="Erhöht die Ereignisfrequenz für Demonstrationszwecke", key="demo_mode_toggle")
 st.session_state['demo_mode'] = demo_mode_new
 demo_mode = demo_mode_new
+
+# Update Simulation mit neuem Demo-Modus
+if 'simulation' in st.session_state:
+    old_demo_mode = st.session_state.simulation.demo_mode
+    if old_demo_mode != demo_mode_new:
+        st.session_state.simulation.set_demo_mode(demo_mode_new)
+
 if demo_mode:
     st.sidebar.info("Demo-Modus: Ereignisse treten häufiger auf")
 
-# Auto-Refresh toggle (in sidebar - above refresh button)
+# ===== AUTO-REFRESH TOGGLE =====
+# Ermöglicht es Benutzern, automatische Seitenaktualisierung zu aktivieren/deaktivieren
 auto_refresh_new = st.sidebar.toggle("🔄 Auto-Refresh", value=auto_refresh, help="Aktualisiert die Seite automatisch alle 30 Sekunden", key="auto_refresh_toggle")
 st.session_state['auto_refresh'] = auto_refresh_new
 auto_refresh = auto_refresh_new
 
+# ===== AKTUALISIERUNGSINTERVALL AUSWAHL =====
+# Ermöglicht es Benutzern, das Auto-Refresh-Intervall zu wählen
 refresh_interval_options = ["10 Sekunden", "30 Sekunden", "60 Sekunden"]
 refresh_interval_index = refresh_interval_options.index(refresh_interval_key) if refresh_interval_key in refresh_interval_options else 1
 refresh_interval = st.sidebar.selectbox("Aktualisierungsintervall", refresh_interval_options, index=refresh_interval_index, key="refresh_interval_selectbox", disabled=not auto_refresh)
@@ -647,10 +644,17 @@ if auto_refresh:
 
 st.sidebar.markdown("")  # Spacing
 
+# ===== MANUELLER REFRESH BUTTON =====
+# Button für manuelle Seitenaktualisierung
 if st.sidebar.button("🔄 Daten aktualisieren", use_container_width=True):
+    # Cache leeren für alle gecachten Funktionen
+    st.cache_data.clear()
     st.rerun()
 
 st.sidebar.markdown("")  # Spacing
+
+# ===== VERSION UND DATENSCHUTZ INFO =====
+# Zeigt Versionsinformationen und Datenschutzhinweise
 st.sidebar.markdown("""
 <div style="font-size: 0.75rem; color: #9ca3af; padding: 0.5rem 0; line-height: 1.6;">
     <p style="margin: 0.25rem 0;"><strong>HospitalFlow MVP v1.0</strong></p>
@@ -659,7 +663,8 @@ st.sidebar.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Professioneller Footer mit Datenschutz & Ethik
+# ===== FOOTER MIT DATENSCHUTZ & ETHIK =====
+# Professioneller Footer mit wichtigen Informationen zu Datenschutz, Ethik und Datennutzung
 footer_timestamp = get_local_time().strftime('%Y-%m-%d %H:%M:%S')
 st.markdown(f"""
 <div class="footer">
@@ -693,14 +698,17 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Auto-Refresh implementieren
+# ===== AUTO-REFRESH IMPLEMENTIERUNG =====
+# Implementiert die automatische Seitenaktualisierung basierend auf konfiguriertem Intervall
 if auto_refresh:
     # Prüfe ob genug Zeit vergangen ist seit dem letzten Refresh
     if 'last_auto_refresh' not in st.session_state:
         st.session_state.last_auto_refresh = time.time()
     
+    # Berechne vergangene Zeit seit letztem Refresh
     elapsed = time.time() - st.session_state.last_auto_refresh
     if elapsed >= refresh_seconds:
+        # Zeit ist abgelaufen: Aktualisiere Seite
         st.session_state.last_auto_refresh = time.time()
-        st.rerun()
+        st.rerun()  # Neuladen der gesamten Streamlit-Seite
 

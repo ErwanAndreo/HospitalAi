@@ -7,33 +7,31 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 import io
+import json
 from utils import (
     format_time_ago, get_severity_color, get_priority_color, get_risk_color,
     get_status_color, calculate_inventory_status, calculate_capacity_status,
     format_duration_minutes, get_department_color, get_system_status,
     get_metric_severity_for_load, get_metric_severity_for_count, get_metric_severity_for_free,
-    get_explanation_score_color
+    get_explanation_score_color, get_department_name_mapping, get_department_display_name,
+    convert_utc_to_local
 )
-from ui.components import render_badge, render_empty_state
+from ui.components import render_badge, render_empty_state, render_loading_spinner
 
 
-# Deutsche Übersetzungen
-DEPT_MAP = {
-    'ER': 'Notaufnahme',
-    'ED': 'Notaufnahme',
-    'ICU': 'Intensivstation',
-    'Surgery': 'Chirurgie',
+# Deutsche Übersetzungen - verwende zentrales Mapping aus utils
+DEPT_MAP = get_department_name_mapping()
+# Erweitere für Kompatibilität mit alten Bezeichnungen
+DEPT_MAP.update({
     'General Ward': 'Allgemeinstation',
-    'Cardiology': 'Kardiologie',
     'Neurology': 'Neurologie',
     'Pediatrics': 'Pädiatrie',
     'Oncology': 'Onkologie',
-    'Orthopedics': 'Orthopädie',
     'Maternity': 'Geburtshilfe',
     'Radiology': 'Radiologie',
     'Other': 'Andere',
     'N/A': 'N/A',
-}
+})
 
 METRIC_TYPE_MAP = {
     'patient_count': 'Patientenzahl',
@@ -120,6 +118,29 @@ def export_to_csv(df: pd.DataFrame, filename_prefix: str = "export") -> bytes:
     return output.getvalue().encode('utf-8')
 
 
+def prepare_export_df(df: pd.DataFrame, required_cols: list, default_values: dict = None) -> pd.DataFrame:
+    """Bereitet DataFrame für Export vor, fügt fehlende Spalten mit Standardwerten hinzu"""
+    export_df = df.copy()
+    if default_values is None:
+        default_values = {}
+    
+    for col in required_cols:
+        if col not in export_df.columns:
+            # Use provided default or infer from column name
+            if col in default_values:
+                export_df[col] = default_values[col]
+            elif col in ['timestamp']:
+                export_df[col] = pd.Timestamp.now()
+            elif any(x in col.lower() for x in ['name', 'title', 'type', 'category', 'department', 'unit', 'location', 'status', 'priority', 'id']):
+                export_df[col] = ''
+            elif any(x in col.lower() for x in ['count', 'stock', 'threshold', 'capacity', 'value', 'minutes', 'level']):
+                export_df[col] = 0
+            else:
+                export_df[col] = ''
+    
+    return export_df[required_cols]
+
+
 def render_metrics_section(df: pd.DataFrame, time_range_minutes: int, search_text: str, 
                            selected_departments: list, min_value: float, max_value: float):
     """Rendert Metriken-Sektion"""
@@ -165,7 +186,23 @@ def render_metrics_section(df: pd.DataFrame, time_range_minutes: int, search_tex
     # Tabelle
     st.markdown("#### Metriken-Tabelle")
     display_df = filtered_df.copy()
-    display_df['Zeitstempel'] = pd.to_datetime(display_df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+    # Convert to datetime safely - handle different formats
+    if 'timestamp' in display_df.columns and not display_df.empty:
+        try:
+            dt_series = pd.to_datetime(display_df['timestamp'], errors='coerce', infer_datetime_format=True)
+            # Only use .dt if it's actually a datetime type
+            if pd.api.types.is_datetime64_any_dtype(dt_series):
+                # Konvertiere UTC zu lokaler Zeit für Anzeige
+                # Verwende apply um convert_utc_to_local auf jeden Wert anzuwenden
+                display_df['Zeitstempel'] = dt_series.apply(lambda x: convert_utc_to_local(x).strftime('%Y-%m-%d %H:%M:%S') if convert_utc_to_local(x) else str(x))
+            else:
+                # Fallback: convert to string as-is
+                display_df['Zeitstempel'] = display_df['timestamp'].astype(str)
+        except Exception:
+            # Fallback: use timestamp as string
+            display_df['Zeitstempel'] = display_df['timestamp'].astype(str) if 'timestamp' in display_df.columns else ''
+    else:
+        display_df['Zeitstempel'] = ''
     display_df['Typ'] = display_df['metric_type'].map(lambda x: METRIC_TYPE_MAP.get(x, x))
     display_df['Wert'] = display_df['value'].round(2)
     display_df['Einheit'] = display_df.get('unit', '')
@@ -177,7 +214,10 @@ def render_metrics_section(df: pd.DataFrame, time_range_minutes: int, search_tex
     # Export
     col1, col2 = st.columns([1, 4])
     with col1:
-        csv_data = export_to_csv(filtered_df[['timestamp', 'metric_type', 'value', 'unit', 'department']], "metrics")
+        # Fix: Use helper function to safely prepare export DataFrame
+        required_cols = ['timestamp', 'metric_type', 'value', 'unit', 'department']
+        export_df = prepare_export_df(filtered_df, required_cols)
+        csv_data = export_to_csv(export_df, "metrics")
         st.download_button(
             "📥 CSV Export",
             csv_data,
@@ -196,11 +236,32 @@ def render_metrics_section(df: pd.DataFrame, time_range_minutes: int, search_tex
     metric_data = filtered_df[filtered_df['metric_type'] == selected_metric].sort_values('timestamp')
     if not metric_data.empty:
         metric_data = metric_data.copy()
+        # Runde Timestamps auf Sekunden (entferne Millisekunden)
+        if 'timestamp' in metric_data.columns:
+            metric_data['timestamp'] = pd.to_datetime(metric_data['timestamp']).dt.floor('S')
         if 'department' in metric_data.columns:
             metric_data['Abteilung'] = metric_data['department'].map(lambda d: DEPT_MAP.get(d, d) if pd.notna(d) else '')
             color_col = 'Abteilung'
         else:
             color_col = None
+        
+        # Aggregiere auf 30-Sekunden-Intervalle
+        from utils import aggregate_to_30_seconds
+        # Wenn color_col vorhanden ist, müssen wir nach beiden gruppieren
+        if color_col and color_col in metric_data.columns:
+            # Aggregiere für jede Abteilung separat
+            metric_data_list = []
+            for dept in metric_data[color_col].unique():
+                dept_data = metric_data[metric_data[color_col] == dept].copy()
+                if not dept_data.empty:
+                    dept_agg = aggregate_to_30_seconds(dept_data, timestamp_col='timestamp', value_col='value', agg_func='mean')
+                    metric_data_list.append(dept_agg)
+            if metric_data_list:
+                metric_data = pd.concat(metric_data_list, ignore_index=True)
+            else:
+                metric_data = aggregate_to_30_seconds(metric_data, timestamp_col='timestamp', value_col='value', agg_func='mean')
+        else:
+            metric_data = aggregate_to_30_seconds(metric_data, timestamp_col='timestamp', value_col='value', agg_func='mean')
         
         fig = px.line(
             metric_data,
@@ -266,12 +327,32 @@ def render_alerts_section(df: pd.DataFrame, search_text: str, selected_departmen
     # Tabelle
     st.markdown("#### Alerts-Tabelle")
     display_df = filtered_df.copy()
-    display_df['Zeitstempel'] = pd.to_datetime(display_df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
-    display_df['Typ'] = display_df.get('alert_type', '')
+    # Convert to datetime safely
+    if 'timestamp' in display_df.columns and not display_df.empty:
+        try:
+            dt_series = pd.to_datetime(display_df['timestamp'], errors='coerce', infer_datetime_format=True)
+            if pd.api.types.is_datetime64_any_dtype(dt_series):
+                # Konvertiere UTC zu lokaler Zeit für Anzeige
+                display_df['Zeitstempel'] = dt_series.apply(lambda x: convert_utc_to_local(x).strftime('%Y-%m-%d %H:%M:%S') if convert_utc_to_local(x) else str(x))
+            else:
+                display_df['Zeitstempel'] = display_df['timestamp'].astype(str)
+        except Exception:
+            display_df['Zeitstempel'] = display_df['timestamp'].astype(str) if 'timestamp' in display_df.columns else ''
+    else:
+        display_df['Zeitstempel'] = ''
+    
+    # Fix: Use column access with fallback to Series instead of .get() which returns scalar
+    display_df['Typ'] = display_df['alert_type'] if 'alert_type' in display_df.columns else pd.Series([''] * len(display_df), index=display_df.index)
     display_df['Schweregrad'] = display_df['severity'].map(lambda x: SEVERITY_MAP.get(x, x))
     display_df['Nachricht'] = display_df['message']
-    display_df['Abteilung'] = display_df.get('department', '').map(lambda x: DEPT_MAP.get(x, x) if pd.notna(x) else '')
-    display_df['Status'] = display_df.get('resolved', 0).map(lambda x: 'Gelöst' if x else 'Aktiv')
+    
+    # Fix: Use column access with fallback to Series instead of .get() which returns scalar
+    dept_series = display_df['department'] if 'department' in display_df.columns else pd.Series([''] * len(display_df), index=display_df.index)
+    display_df['Abteilung'] = dept_series.map(lambda x: DEPT_MAP.get(x, x) if pd.notna(x) else '')
+    
+    # Fix: Use column access with fallback to Series instead of .get() which returns scalar
+    resolved_series = display_df['resolved'] if 'resolved' in display_df.columns else pd.Series([0] * len(display_df), index=display_df.index)
+    display_df['Status'] = resolved_series.map(lambda x: 'Gelöst' if x else 'Aktiv')
     
     table_cols = ['Zeitstempel', 'Typ', 'Schweregrad', 'Nachricht', 'Abteilung', 'Status']
     st.dataframe(display_df[table_cols], use_container_width=True, hide_index=True)
@@ -279,7 +360,11 @@ def render_alerts_section(df: pd.DataFrame, search_text: str, selected_departmen
     # Export
     col1, col2 = st.columns([1, 4])
     with col1:
-        csv_data = export_to_csv(filtered_df[['timestamp', 'alert_type', 'severity', 'message', 'department', 'resolved']], "alerts")
+        # Fix: Use helper function to safely prepare export DataFrame
+        required_cols = ['timestamp', 'alert_type', 'severity', 'message', 'department', 'resolved']
+        default_values = {'resolved': 0, 'severity': 'medium'}
+        export_df = prepare_export_df(filtered_df, required_cols, default_values)
+        csv_data = export_to_csv(export_df, "alerts")
         st.download_button(
             "📥 CSV Export",
             csv_data,
@@ -305,7 +390,19 @@ def render_predictions_section(df: pd.DataFrame, search_text: str, selected_depa
     # Tabelle
     st.markdown("#### Vorhersagen-Tabelle")
     display_df = filtered_df.copy()
-    display_df['Zeitstempel'] = pd.to_datetime(display_df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+    # Convert to datetime safely
+    if 'timestamp' in display_df.columns and not display_df.empty:
+        try:
+            dt_series = pd.to_datetime(display_df['timestamp'], errors='coerce', infer_datetime_format=True)
+            if pd.api.types.is_datetime64_any_dtype(dt_series):
+                # Konvertiere UTC zu lokaler Zeit für Anzeige
+                display_df['Zeitstempel'] = dt_series.apply(lambda x: convert_utc_to_local(x).strftime('%Y-%m-%d %H:%M:%S') if convert_utc_to_local(x) else str(x))
+            else:
+                display_df['Zeitstempel'] = display_df['timestamp'].astype(str)
+        except Exception:
+            display_df['Zeitstempel'] = display_df['timestamp'].astype(str) if 'timestamp' in display_df.columns else ''
+    else:
+        display_df['Zeitstempel'] = ''
     display_df['Typ'] = display_df.get('prediction_type', '').map(lambda x: METRIC_TYPE_MAP.get(x, x))
     display_df['Vorhergesagter Wert'] = display_df['predicted_value'].round(2)
     display_df['Konfidenz'] = (display_df.get('confidence', 0) * 100).round(1).astype(str) + '%'
@@ -332,7 +429,10 @@ def render_predictions_section(df: pd.DataFrame, search_text: str, selected_depa
     # Export
     col1, col2 = st.columns([1, 4])
     with col1:
-        csv_data = export_to_csv(filtered_df[['timestamp', 'prediction_type', 'predicted_value', 'confidence', 'time_horizon_minutes', 'department']], "predictions")
+        # Fix: Use helper function to safely prepare export DataFrame
+        required_cols = ['timestamp', 'prediction_type', 'predicted_value', 'confidence', 'time_horizon_minutes', 'department']
+        export_df = prepare_export_df(filtered_df, required_cols)
+        csv_data = export_to_csv(export_df, "predictions")
         st.download_button(
             "📥 CSV Export",
             csv_data,
@@ -387,7 +487,19 @@ def render_recommendations_section(df: pd.DataFrame, search_text: str, selected_
     # Tabelle
     st.markdown("#### Empfehlungen-Tabelle")
     display_df = filtered_df.copy()
-    display_df['Zeitstempel'] = pd.to_datetime(display_df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+    # Convert to datetime safely
+    if 'timestamp' in display_df.columns and not display_df.empty:
+        try:
+            dt_series = pd.to_datetime(display_df['timestamp'], errors='coerce', infer_datetime_format=True)
+            if pd.api.types.is_datetime64_any_dtype(dt_series):
+                # Konvertiere UTC zu lokaler Zeit für Anzeige
+                display_df['Zeitstempel'] = dt_series.apply(lambda x: convert_utc_to_local(x).strftime('%Y-%m-%d %H:%M:%S') if convert_utc_to_local(x) else str(x))
+            else:
+                display_df['Zeitstempel'] = display_df['timestamp'].astype(str)
+        except Exception:
+            display_df['Zeitstempel'] = display_df['timestamp'].astype(str) if 'timestamp' in display_df.columns else ''
+    else:
+        display_df['Zeitstempel'] = ''
     display_df['Titel'] = display_df.get('title', '')
     display_df['Priorität'] = display_df['priority'].map(lambda x: SEVERITY_MAP.get(x, x))
     display_df['Abteilung'] = display_df.get('department', '').map(lambda x: DEPT_MAP.get(x, x) if pd.notna(x) else '')
@@ -399,7 +511,10 @@ def render_recommendations_section(df: pd.DataFrame, search_text: str, selected_
     # Export
     col1, col2 = st.columns([1, 4])
     with col1:
-        csv_data = export_to_csv(filtered_df[['timestamp', 'title', 'priority', 'department', 'status']], "recommendations")
+        # Fix: Use helper function to safely prepare export DataFrame
+        required_cols = ['timestamp', 'title', 'priority', 'department', 'status']
+        export_df = prepare_export_df(filtered_df, required_cols)
+        csv_data = export_to_csv(export_df, "recommendations")
         st.download_button(
             "📥 CSV Export",
             csv_data,
@@ -430,7 +545,19 @@ def render_transport_section(df: pd.DataFrame, search_text: str, selected_depart
     # Tabelle
     st.markdown("#### Transport-Tabelle")
     display_df = filtered_df.copy()
-    display_df['Zeitstempel'] = pd.to_datetime(display_df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+    # Convert to datetime safely
+    if 'timestamp' in display_df.columns and not display_df.empty:
+        try:
+            dt_series = pd.to_datetime(display_df['timestamp'], errors='coerce', infer_datetime_format=True)
+            if pd.api.types.is_datetime64_any_dtype(dt_series):
+                # Konvertiere UTC zu lokaler Zeit für Anzeige
+                display_df['Zeitstempel'] = dt_series.apply(lambda x: convert_utc_to_local(x).strftime('%Y-%m-%d %H:%M:%S') if convert_utc_to_local(x) else str(x))
+            else:
+                display_df['Zeitstempel'] = display_df['timestamp'].astype(str)
+        except Exception:
+            display_df['Zeitstempel'] = display_df['timestamp'].astype(str) if 'timestamp' in display_df.columns else ''
+    else:
+        display_df['Zeitstempel'] = ''
     display_df['Typ'] = display_df.get('request_type', '')
     display_df['Von'] = display_df.get('from_location', '')
     display_df['Nach'] = display_df.get('to_location', '')
@@ -444,7 +571,10 @@ def render_transport_section(df: pd.DataFrame, search_text: str, selected_depart
     # Export
     col1, col2 = st.columns([1, 4])
     with col1:
-        csv_data = export_to_csv(filtered_df[['timestamp', 'request_type', 'from_location', 'to_location', 'priority', 'status', 'estimated_time_minutes']], "transport")
+        # Fix: Use helper function to safely prepare export DataFrame
+        required_cols = ['timestamp', 'request_type', 'from_location', 'to_location', 'priority', 'status', 'estimated_time_minutes']
+        export_df = prepare_export_df(filtered_df, required_cols)
+        csv_data = export_to_csv(export_df, "transport")
         st.download_button(
             "📥 CSV Export",
             csv_data,
@@ -479,13 +609,19 @@ def render_inventory_section(df: pd.DataFrame, search_text: str, selected_depart
     # Tabelle
     st.markdown("#### Inventar-Tabelle")
     display_df = filtered_df.copy()
-    display_df['Artikel'] = display_df.get('item_name', '')
-    display_df['Kategorie'] = display_df.get('category', '')
-    display_df['Aktueller Bestand'] = display_df['current_stock']
-    display_df['Mindestschwelle'] = display_df['min_threshold']
-    display_df['Max. Kapazität'] = display_df.get('max_capacity', 0)
-    display_df['Abteilung'] = display_df.get('department', '').map(lambda x: DEPT_MAP.get(x, x) if pd.notna(x) else '')
-    display_df['Einheit'] = display_df.get('unit', '')
+    
+    # Fix: Use column access with fallback to Series instead of .get() which returns scalar
+    display_df['Artikel'] = display_df['item_name'] if 'item_name' in display_df.columns else pd.Series([''] * len(display_df), index=display_df.index)
+    display_df['Kategorie'] = display_df['category'] if 'category' in display_df.columns else pd.Series([''] * len(display_df), index=display_df.index)
+    display_df['Aktueller Bestand'] = display_df['current_stock'] if 'current_stock' in display_df.columns else pd.Series([0] * len(display_df), index=display_df.index)
+    display_df['Mindestschwelle'] = display_df['min_threshold'] if 'min_threshold' in display_df.columns else pd.Series([0] * len(display_df), index=display_df.index)
+    display_df['Max. Kapazität'] = display_df['max_capacity'] if 'max_capacity' in display_df.columns else pd.Series([0] * len(display_df), index=display_df.index)
+    
+    # Fix: Use column access with fallback to Series instead of .get() which returns scalar
+    dept_series = display_df['department'] if 'department' in display_df.columns else pd.Series([''] * len(display_df), index=display_df.index)
+    display_df['Abteilung'] = dept_series.map(lambda x: DEPT_MAP.get(x, x) if pd.notna(x) else '')
+    
+    display_df['Einheit'] = display_df['unit'] if 'unit' in display_df.columns else pd.Series([''] * len(display_df), index=display_df.index)
     
     table_cols = ['Artikel', 'Kategorie', 'Aktueller Bestand', 'Mindestschwelle', 'Max. Kapazität', 'Abteilung', 'Einheit']
     st.dataframe(display_df[table_cols], use_container_width=True, hide_index=True)
@@ -493,7 +629,10 @@ def render_inventory_section(df: pd.DataFrame, search_text: str, selected_depart
     # Export
     col1, col2 = st.columns([1, 4])
     with col1:
-        csv_data = export_to_csv(filtered_df[['item_name', 'category', 'current_stock', 'min_threshold', 'max_capacity', 'department', 'unit']], "inventory")
+        # Fix: Use helper function to safely prepare export DataFrame
+        required_cols = ['item_name', 'category', 'current_stock', 'min_threshold', 'max_capacity', 'department', 'unit']
+        export_df = prepare_export_df(filtered_df, required_cols)
+        csv_data = export_to_csv(export_df, "inventory")
         st.download_button(
             "📥 CSV Export",
             csv_data,
@@ -519,11 +658,30 @@ def render_devices_section(df: pd.DataFrame, search_text: str, selected_departme
     # Tabelle
     st.markdown("#### Geräte-Tabelle")
     display_df = filtered_df.copy()
-    display_df['Gerät'] = display_df.get('device_type', '')
-    display_df['Geräte-ID'] = display_df.get('device_id', '')
-    display_df['Dringlichkeit'] = display_df.get('urgency_level', '').map(lambda x: SEVERITY_MAP.get(x, x) if pd.notna(x) else '')
-    display_df['Nächste Wartung'] = pd.to_datetime(display_df.get('next_maintenance_due', ''), errors='coerce').dt.strftime('%Y-%m-%d')
-    display_df['Abteilung'] = display_df.get('department', '').map(lambda x: DEPT_MAP.get(x, x) if pd.notna(x) else '')
+    
+    # Fix: Use column access with fallback to Series instead of .get() which returns scalar
+    display_df['Gerät'] = display_df['device_type'] if 'device_type' in display_df.columns else pd.Series([''] * len(display_df), index=display_df.index)
+    display_df['Geräte-ID'] = display_df['device_id'] if 'device_id' in display_df.columns else pd.Series([''] * len(display_df), index=display_df.index)
+    
+    # Fix: Use column access with fallback to Series instead of .get() which returns scalar
+    urgency_series = display_df['urgency_level'] if 'urgency_level' in display_df.columns else pd.Series([''] * len(display_df), index=display_df.index)
+    display_df['Dringlichkeit'] = urgency_series.map(lambda x: SEVERITY_MAP.get(x, x) if pd.notna(x) else '')
+    
+    # Fix: Use column access with fallback to Series instead of .get() which returns scalar
+    maintenance_series = display_df['next_maintenance_due'] if 'next_maintenance_due' in display_df.columns else pd.Series([pd.NaT] * len(display_df), index=display_df.index)
+    # Convert to datetime safely
+    try:
+        dt_series = pd.to_datetime(maintenance_series, errors='coerce', infer_datetime_format=True)
+        if pd.api.types.is_datetime64_any_dtype(dt_series):
+            display_df['Nächste Wartung'] = dt_series.dt.strftime('%Y-%m-%d')
+        else:
+            display_df['Nächste Wartung'] = maintenance_series.astype(str)
+    except Exception:
+        display_df['Nächste Wartung'] = maintenance_series.astype(str)
+    
+    # Fix: Use column access with fallback to Series instead of .get() which returns scalar
+    dept_series = display_df['department'] if 'department' in display_df.columns else pd.Series([''] * len(display_df), index=display_df.index)
+    display_df['Abteilung'] = dept_series.map(lambda x: DEPT_MAP.get(x, x) if pd.notna(x) else '')
     
     table_cols = ['Gerät', 'Geräte-ID', 'Dringlichkeit', 'Nächste Wartung', 'Abteilung']
     st.dataframe(display_df[table_cols], use_container_width=True, hide_index=True)
@@ -531,7 +689,10 @@ def render_devices_section(df: pd.DataFrame, search_text: str, selected_departme
     # Export
     col1, col2 = st.columns([1, 4])
     with col1:
-        csv_data = export_to_csv(filtered_df[['device_type', 'device_id', 'urgency_level', 'next_maintenance_due', 'department']], "devices")
+        # Fix: Use helper function to safely prepare export DataFrame
+        required_cols = ['device_type', 'device_id', 'urgency_level', 'next_maintenance_due', 'department']
+        export_df = prepare_export_df(filtered_df, required_cols)
+        csv_data = export_to_csv(export_df, "devices")
         st.download_button(
             "📥 CSV Export",
             csv_data,
@@ -597,76 +758,99 @@ def render_capacity_section(df: pd.DataFrame, search_text: str, selected_departm
         )
 
 
-@st.cache_data(ttl=300)  # Cache für 5 Minuten
-def get_all_data(_db, _sim, time_range_minutes: int):
-    """Hole alle Daten mit Caching"""
-    data = {}
-    
+# ===== LAZY DATA FETCHING FUNCTIONS =====
+# Jede Funktion lädt Daten nur bei Bedarf (wenn Tab geöffnet wird)
+# Mit Caching für bessere Performance
+
+@st.cache_data(ttl=300)
+def get_metrics_data_lazy(_db, time_range_minutes: int):
+    """Lädt Metriken-Daten lazy"""
     try:
-        # Metriken
         if time_range_minutes:
-            data['metrics'] = _db.get_metrics_last_n_minutes(time_range_minutes)
+            return _db.get_metrics_last_n_minutes(time_range_minutes)
         else:
-            data['metrics'] = _db.get_recent_metrics(1000)
+            return _db.get_recent_metrics(1000)
     except Exception as e:
-        data['metrics'] = []
-    
+        return []
+
+@st.cache_data(ttl=300)
+def get_alerts_data_lazy(_db, time_range_minutes: int):
+    """Lädt Alerts-Daten lazy"""
     try:
-        # Alerts
         hours = (time_range_minutes // 60) if time_range_minutes else 168  # Default: 7 Tage
-        data['alerts'] = _db.get_alerts_by_time_range(hours)
+        return _db.get_alerts_by_time_range(hours)
     except Exception as e:
-        data['alerts'] = []
-    
+        return []
+
+@st.cache_data(ttl=300)
+def get_predictions_data_lazy(_db):
+    """Lädt Vorhersagen-Daten lazy"""
     try:
-        # Vorhersagen
-        data['predictions'] = _db.get_predictions(60)  # Nächste 60 Minuten
+        return _db.get_predictions(60)  # Nächste 60 Minuten
     except Exception as e:
-        data['predictions'] = []
-    
+        return []
+
+@st.cache_data(ttl=300)
+def get_recommendations_data_lazy(_db):
+    """Lädt Empfehlungen-Daten lazy"""
     try:
-        # Empfehlungen
-        data['recommendations'] = _db.get_pending_recommendations()
+        return _db.get_pending_recommendations()
     except Exception as e:
-        data['recommendations'] = []
-    
+        return []
+
+@st.cache_data(ttl=300)
+def get_transport_data_lazy(_db):
+    """Lädt Transport-Daten lazy"""
     try:
-        # Transport
-        data['transport'] = _db.get_transport_requests()
+        return _db.get_transport_requests()
     except Exception as e:
-        data['transport'] = []
-    
+        return []
+
+@st.cache_data(ttl=300)
+def get_inventory_data_lazy(_db):
+    """Lädt Inventar-Daten lazy"""
     try:
-        # Inventar
-        data['inventory'] = _db.get_inventory_status()
+        return _db.get_inventory_status()
     except Exception as e:
-        data['inventory'] = []
-    
+        return []
+
+@st.cache_data(ttl=300)
+def get_devices_data_lazy(_db):
+    """Lädt Geräte-Daten lazy"""
     try:
-        # Geräte
-        data['devices'] = _db.get_device_maintenance_urgencies()
+        return _db.get_device_maintenance_urgencies()
     except Exception as e:
-        data['devices'] = []
-    
+        return []
+
+@st.cache_data(ttl=300)
+def get_capacity_data_lazy(_db, _sim):
+    """Lädt Kapazitäts-Daten lazy"""
     try:
-        # Kapazität
-        sim_metrics = _sim.get_current_metrics() if _sim else {}
-        if sim_metrics and isinstance(sim_metrics, dict) and len(sim_metrics) > 0:
-            data['capacity'] = _db.get_capacity_from_simulation(sim_metrics)
+        # Verwende gecachte Metriken aus session_state
+        if 'cached_sim_metrics' in st.session_state:
+            sim_metrics = st.session_state.cached_sim_metrics
         else:
-            data['capacity'] = _db.get_capacity_overview()
+            sim_metrics = _sim.get_current_metrics() if _sim else {}
+        if sim_metrics and isinstance(sim_metrics, dict) and len(sim_metrics) > 0:
+            return _db.get_capacity_from_simulation(sim_metrics)
+        else:
+            return _db.get_capacity_overview()
     except Exception as e:
         try:
-            data['capacity'] = _db.get_capacity_overview()
+            return _db.get_capacity_overview()
         except:
-            data['capacity'] = []
-    
-    return data
+            return []
 
 
 def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get_cached_capacity=None):
     """Rendert die Live-Metriken-Seite mit umfassender Datenübersicht"""
+    # ===== SOFORT: STRUKTUR RENDERN =====
     st.markdown("### Live-Metriken - Umfassende Datenübersicht")
+    
+    # Loading Spinner
+    spinner_placeholder = st.empty()
+    with spinner_placeholder.container():
+        st.markdown(render_loading_spinner("Lade Datenübersicht..."), unsafe_allow_html=True)
     
     # Auto-Refresh Toggle
     col1, col2, col3 = st.columns([1, 1, 4])
@@ -674,75 +858,99 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
         auto_refresh = st.checkbox("🔄 Auto-Refresh (5 Min.)", value=False, key="auto_refresh_metrics")
     with col2:
         if st.button("🔄 Jetzt aktualisieren"):
-            st.cache_data.clear()
+            st.cache_data.clear()  # Cache leeren bei manueller Aktualisierung
             st.rerun()
     
-    # Filter-Bereich
-    with st.expander("🔍 Filter", expanded=True):
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            time_range = st.selectbox(
-                "Zeitraum",
-                ['1h', '6h', '24h', '7d', '30d', 'all'],
-                index=3,  # Default: 7d
-                key="time_range_filter"
-            )
-            time_range_minutes = get_time_range_minutes(time_range)
-        
-        with col2:
-            # Alle verfügbaren Abteilungen sammeln
-            all_departments = set()
-            # Aus Metriken
-            metrics_sample = db.get_recent_metrics(100)
-            if metrics_sample:
-                depts = [m.get('department') for m in metrics_sample if m.get('department')]
-                all_departments.update(depts)
-            # Aus Kapazität
-            capacity_sample = db.get_capacity_overview()
-            if capacity_sample:
-                depts = [c.get('department') for c in capacity_sample if c.get('department')]
-                all_departments.update(depts)
+    # Leere Platzhalter vorbereiten
+    filters_placeholder = st.empty()
+    tabs_placeholder = st.empty()
+    
+    # ===== DATEN ABRUFEN =====
+    # ===== PROGRESSIV: FILTER UND TABS =====
+    with filters_placeholder.container():
+        # Filter-Bereich
+        with st.expander("🔍 Filter", expanded=True):
+            col1, col2, col3 = st.columns(3)
             
-            department_list = sorted([d for d in all_departments if d])
-            selected_departments = st.multiselect(
-                "Abteilung",
-                department_list,
-                key="department_filter"
-            )
-        
-        with col3:
-            search_text = st.text_input("🔍 Textsuche", key="search_filter", placeholder="Suche in allen Feldern...")
-        
-        # Zusätzliche Filter
-        col4, col5 = st.columns(2)
-        with col4:
-            min_value = st.number_input("Min. Wert", value=None, key="min_value_filter", placeholder="Optional")
-        with col5:
-            max_value = st.number_input("Max. Wert", value=None, key="max_value_filter", placeholder="Optional")
+            with col1:
+                time_range = st.selectbox(
+                    "Zeitraum",
+                    ['1h', '6h', '24h', '7d', '30d', 'all'],
+                    index=3,  # Default: 7d
+                    key="time_range_filter"
+                )
+                time_range_minutes = get_time_range_minutes(time_range)
+            
+            with col2:
+                # Alle verfügbaren Abteilungen sammeln
+                all_departments = set()
+                # Aus Metriken
+                metrics_sample = db.get_recent_metrics(100)
+                if metrics_sample:
+                    depts = [m.get('department') for m in metrics_sample if m.get('department')]
+                    all_departments.update(depts)
+                # Aus Kapazität (verwende get_cached_capacity für optimierten Zugriff)
+                if get_cached_capacity:
+                    capacity_sample = get_cached_capacity()
+                elif 'background_data' in st.session_state and st.session_state.background_data:
+                    capacity_sample = st.session_state.background_data.get('capacity', [])
+                else:
+                    capacity_sample = db.get_capacity_overview()  # Fallback
+                if capacity_sample:
+                    depts = [c.get('department') for c in capacity_sample if c.get('department')]
+                    all_departments.update(depts)
+                
+                department_list = sorted([d for d in all_departments if d])
+                selected_departments = st.multiselect(
+                    "Abteilung",
+                    department_list,
+                    key="department_filter"
+                )
+            
+            with col3:
+                search_text = st.text_input("🔍 Textsuche", key="search_filter", placeholder="Suche in allen Feldern...")
+                
+                # Zusätzliche Filter
+                col4, col5 = st.columns(2)
+                with col4:
+                    min_value = st.number_input("Min. Wert", value=None, key="min_value_filter", placeholder="Optional")
+                with col5:
+                    max_value = st.number_input("Max. Wert", value=None, key="max_value_filter", placeholder="Optional")
     
-    # Daten abrufen
-    try:
-        all_data = get_all_data(db, sim, time_range_minutes)
-    except Exception as e:
-        st.error(f"Fehler beim Laden der Daten: {str(e)}")
-        return
+    # Spinner entfernen
+    spinner_placeholder.empty()
     
-    # Konvertiere zu DataFrames
-    dataframes = {}
-    for key, value in all_data.items():
+    # Daten werden lazy geladen - nur wenn Tab geöffnet wird
+    # Initialisiere leere DataFrames für Filter
+    alerts_df = pd.DataFrame()
+    recommendations_df = pd.DataFrame()
+    transport_df = pd.DataFrame()
+    
+    # Lade nur Daten für Filter-Tabs (Alerts, Recommendations, Transport) vorab
+    # Verwende Background-Daten für sofortigen Zugriff
+    if 'background_data' in st.session_state and st.session_state.background_data:
+        background_data = st.session_state.background_data
+        alerts_data = background_data.get('alerts', [])
+        recommendations_data = background_data.get('recommendations', [])
+        transport_data = background_data.get('transport', [])
+    else:
+        # Fallback: Lazy Loading
         try:
-            if value:
-                dataframes[key] = pd.DataFrame(value)
-            else:
-                dataframes[key] = pd.DataFrame()
+            alerts_data = get_alerts_data_lazy(db, time_range_minutes)
         except Exception as e:
-            dataframes[key] = pd.DataFrame()
+            alerts_data = []
+        try:
+            recommendations_data = get_recommendations_data_lazy(db)
+        except Exception as e:
+            recommendations_data = []
+        try:
+            transport_data = get_transport_data_lazy(db)
+        except Exception as e:
+            transport_data = []
     
-    # Zusätzliche Filter für spezifische Tabs (vor den Tabs definieren)
-    alerts_df = dataframes.get('alerts', pd.DataFrame())
-    recommendations_df = dataframes.get('recommendations', pd.DataFrame())
-    transport_df = dataframes.get('transport', pd.DataFrame())
+    alerts_df = pd.DataFrame(alerts_data) if alerts_data else pd.DataFrame()
+    recommendations_df = pd.DataFrame(recommendations_data) if recommendations_data else pd.DataFrame()
+    transport_df = pd.DataFrame(transport_data) if transport_data else pd.DataFrame()
     
     # Zusätzliche Filter in einem Expander
     with st.expander("🔧 Erweiterte Filter", expanded=False):
@@ -779,21 +987,29 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                 )
     
     # Tabs für verschiedene Datentypen
-    tabs = st.tabs([
-        "📊 Metriken",
-        "⚠️ Alerts",
-        "🔮 Vorhersagen",
-        "💡 Empfehlungen",
-        "🚑 Transport",
-        "📦 Inventar",
-        "🔧 Geräte",
-        "🏥 Kapazität"
-    ])
+    with tabs_placeholder.container():
+        tabs = st.tabs([
+            "📊 Metriken",
+            "⚠️ Alerts",
+            "🔮 Vorhersagen",
+            "💡 Empfehlungen",
+            "🚑 Transport",
+            "📦 Inventar",
+            "🔧 Geräte",
+            "🏥 Kapazität"
+        ])
     
-    # Rendere Sektionen
+    # Rendere Sektionen mit Lazy Loading
+    # Daten werden erst geladen wenn Tab tatsächlich gerendert wird
     with tabs[0]:
+        # Metriken-Tab: Lade Daten lazy
+        try:
+            metrics_data = get_metrics_data_lazy(db, time_range_minutes)
+            metrics_df = pd.DataFrame(metrics_data) if metrics_data else pd.DataFrame()
+        except Exception as e:
+            metrics_df = pd.DataFrame()
         render_metrics_section(
-            dataframes.get('metrics', pd.DataFrame()),
+            metrics_df,
             time_range_minutes,
             search_text,
             selected_departments,
@@ -802,6 +1018,7 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
         )
     
     with tabs[1]:
+        # Alerts-Tab: Daten bereits geladen für Filter
         render_alerts_section(
             alerts_df,
             search_text,
@@ -810,13 +1027,23 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
         )
     
     with tabs[2]:
+        # Vorhersagen-Tab: Verwende Background-Daten
+        if 'background_data' in st.session_state and st.session_state.background_data:
+            predictions_data = st.session_state.background_data.get('predictions', [])
+        else:
+            try:
+                predictions_data = get_predictions_data_lazy(db)
+            except Exception as e:
+                predictions_data = []
+        predictions_df = pd.DataFrame(predictions_data) if predictions_data else pd.DataFrame()
         render_predictions_section(
-            dataframes.get('predictions', pd.DataFrame()),
+            predictions_df,
             search_text,
             selected_departments
         )
     
     with tabs[3]:
+        # Empfehlungen-Tab: Daten bereits geladen für Filter
         render_recommendations_section(
             recommendations_df,
             search_text,
@@ -825,6 +1052,7 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
         )
     
     with tabs[4]:
+        # Transport-Tab: Daten bereits geladen für Filter
         render_transport_section(
             transport_df,
             search_text,
@@ -833,22 +1061,49 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
         )
     
     with tabs[5]:
+        # Inventar-Tab: Verwende Background-Daten
+        if 'background_data' in st.session_state and st.session_state.background_data:
+            inventory_data = st.session_state.background_data.get('inventory', [])
+        else:
+            try:
+                inventory_data = get_inventory_data_lazy(db)
+            except Exception as e:
+                inventory_data = []
+        inventory_df = pd.DataFrame(inventory_data) if inventory_data else pd.DataFrame()
         render_inventory_section(
-            dataframes.get('inventory', pd.DataFrame()),
+            inventory_df,
             search_text,
             selected_departments
         )
     
     with tabs[6]:
+        # Geräte-Tab: Verwende Background-Daten
+        if 'background_data' in st.session_state and st.session_state.background_data:
+            devices_data = st.session_state.background_data.get('devices', [])
+        else:
+            try:
+                devices_data = get_devices_data_lazy(db)
+            except Exception as e:
+                devices_data = []
+        devices_df = pd.DataFrame(devices_data) if devices_data else pd.DataFrame()
         render_devices_section(
-            dataframes.get('devices', pd.DataFrame()),
+            devices_df,
             search_text,
             selected_departments
         )
     
     with tabs[7]:
+        # Kapazitäts-Tab: Verwende Background-Daten
+        if 'background_data' in st.session_state and st.session_state.background_data:
+            capacity_data = st.session_state.background_data.get('capacity', [])
+        else:
+            try:
+                capacity_data = get_capacity_data_lazy(db, sim)
+            except Exception as e:
+                capacity_data = []
+        capacity_df = pd.DataFrame(capacity_data) if capacity_data else pd.DataFrame()
         render_capacity_section(
-            dataframes.get('capacity', pd.DataFrame()),
+            capacity_df,
             search_text,
             selected_departments
         )

@@ -1,12 +1,36 @@
 """
 Styling und CSS für HospitalFlow
-Professionelles Design-System
+
+Diese Datei enthält das gesamte benutzerdefinierte CSS-Styling für die Anwendung.
+Es definiert ein professionelles Design-System mit:
+- Konsistenter Typografie
+- Farbpalette und Badges
+- Metrik-Karten und Layout-Komponenten
+- Responsive Design-Regeln
+- Animationen und Übergänge
+
+Das Styling wird über apply_custom_styles() in die Streamlit-App eingebunden.
 """
 import streamlit as st
 
 
 def apply_custom_styles():
-    """Wende benutzerdefiniertes CSS-Styling an"""
+    """
+    Wendet benutzerdefiniertes CSS-Styling auf die Streamlit-Anwendung an.
+    
+    Diese Funktion muss einmal beim Start der Anwendung aufgerufen werden,
+    um das gesamte Design-System zu aktivieren. Das CSS wird in die HTML-Seite
+    eingefügt und überschreibt/ergänzt die Standard-Streamlit-Styles.
+    
+    Das Styling umfasst:
+    - Typografie und Schriftarten
+    - Farben und Badges
+    - Metrik-Karten
+    - Empty States
+    - Footer und Header
+    - Buttons und Eingabefelder
+    - Responsive Design
+    """
     st.markdown("""
     <style>
         /* Professionelle Typografie */
@@ -336,6 +360,79 @@ def apply_custom_styles():
         /* Ladezustände */
         .stSpinner > div {
             border-color: #667eea transparent transparent transparent;
+        }
+        
+        /* Progressive Loading Animationen */
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .fade-in {
+            animation: fadeIn 0.3s ease-out;
+        }
+        
+        .fade-in-delayed {
+            animation: fadeIn 0.4s ease-out 0.1s both;
+        }
+        
+        .fade-in-delayed-2 {
+            animation: fadeIn 0.4s ease-out 0.2s both;
+        }
+        
+        .fade-in-delayed-3 {
+            animation: fadeIn 0.4s ease-out 0.3s both;
+        }
+        
+        /* Loading Spinner */
+        .loading-spinner-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 3rem 2rem;
+            margin: 2rem 0;
+        }
+        
+        .loading-spinner {
+            position: relative;
+            width: 48px;
+            height: 48px;
+            margin-bottom: 1rem;
+        }
+        
+        .spinner {
+            width: 48px;
+            height: 48px;
+            border: 4px solid #e5e7eb;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .loading-text {
+            font-size: 0.9375rem;
+            color: #6b7280;
+            font-weight: 500;
+            letter-spacing: 0.02em;
+        }
+        
+        /* Smooth transitions für alle dynamischen Elemente */
+        .metric-card,
+        .info-card,
+        .empty-state {
+            animation: fadeIn 0.3s ease-out;
         }
     </style>
     """, unsafe_allow_html=True)

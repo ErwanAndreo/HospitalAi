@@ -7,4 +7,8 @@ font = "sans serif"
 
 [server]
 headless = true
+fileWatcherType = "auto"  # Automatisches File Watching für Hot Reload
+
+[runner]
+fastReruns = true  # Schnellere Neuladung bei Code-Änderungen
 

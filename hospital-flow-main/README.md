@@ -47,15 +47,75 @@ A modern, clean MVP dashboard for hospital staff built with Streamlit and SQLite
 
 ## Project Structure
 
+Das Projekt verwendet eine modulare Struktur mit klarer Trennung von Komponenten:
+
 ```
-HospitalFlow AI/
-├── app.py              # Main Streamlit application
-├── db.py               # SQLite database operations
-├── utils.py            # Utility functions (predictions, formatting)
-├── requirements.txt    # Python dependencies
-├── README.md          # This file
-└── hospitalflow.db    # SQLite database (created automatically)
+hospital-flow-main/
+├── app.py                    # Hauptanwendung mit Routing und Navigation
+├── database.py               # SQLite-Datenbankoperationen
+├── simulation.py             # Simulations-Engine
+├── predictions.py            # Vorhersage-Engine
+├── recommendations.py        # Empfehlungs-Engine
+├── optimization.py           # Optimierungs-Engine
+├── utils.py                  # Hilfsfunktionen (Formatierung, Berechnungen)
+├── seed_data.py              # Datenbank-Seeding
+├── requirements.txt          # Python-Abhängigkeiten
+├── Dockerfile                # Docker-Image-Konfiguration
+├── docker-compose.yml        # Docker-Compose-Konfiguration
+├── README.md                 # Diese Datei
+├── SAVE_POINT.md            # Vollständige Projekt-Dokumentation
+├── data/
+│   └── hospitalflow.db      # SQLite-Datenbank (wird automatisch erstellt)
+└── ui/                       # UI-Module
+    ├── __init__.py
+    ├── styling.py           # CSS-Styling
+    ├── components.py        # Wiederverwendbare UI-Komponenten
+    └── pages/               # Seitenmodule
+        ├── __init__.py
+        ├── dashboard.py     # Dashboard-Seite
+        ├── metrics.py       # Live-Metriken-Seite
+        ├── predictions.py   # Vorhersagen-Seite
+        ├── operations.py    # Betrieb-Seite (Alerts, Recommendations, Audit)
+        ├── alerts.py        # Warnungen-Seite
+        ├── recommendations.py  # Empfehlungen-Seite
+        ├── transport.py     # Transport-Management
+        ├── inventory.py     # Inventar-Überwachung
+        ├── devices.py       # Gerätewartung
+        ├── discharge_planning.py  # Entlassungsplanung
+        ├── capacity.py      # Kapazitätsübersicht
+        └── dienstplan.py    # Dienstplan-Verwaltung
 ```
+
+### Modulare Architektur
+
+#### `ui/styling.py`
+Enthält alle CSS-Styles für die Anwendung. Wird einmal beim Start geladen.
+
+#### `ui/components.py`
+Wiederverwendbare UI-Komponenten:
+- `render_badge()` - Schweregrad-Badges
+- `render_empty_state()` - Leere Zustände
+- `render_loading_spinner()` - Ladeanzeigen
+
+#### `ui/pages/`
+Jede Seite hat ihr eigenes Modul:
+- Jedes Modul exportiert eine `render()` Funktion
+- Nimmt `db`, `sim`, und andere benötigte Parameter entgegen
+- Rendert die komplette Seite
+
+#### `app.py`
+Hauptanwendung:
+- Initialisiert Datenbank und Simulation
+- Lädt Styling und Komponenten
+- Routet zu den entsprechenden Seitenmodulen
+- Verwaltet Sidebar-Navigation
+
+### Vorteile der modularen Struktur
+
+- **Bessere Wartbarkeit**: Jede Seite ist isoliert
+- **Einfacheres Testen**: Module können einzeln getestet werden
+- **Wiederverwendbarkeit**: Komponenten können überall verwendet werden
+- **Klarere Organisation**: Logische Trennung von Styling, Komponenten und Seiten
 
 ## Usage
 
@@ -117,21 +177,30 @@ All data is **aggregated only**—no personal information is stored or displayed
 - **Database**: SQLite (file-based, no setup required)
 - **Visualization**: Plotly Express and Graph Objects
 - **Data Processing**: Pandas
-- **Python Version**: 3.8+
+- **Python Version**: 3.11+ (recommended: 3.11 as in Dockerfile)
+- **Architecture**: Modular structure with separated UI components and pages
+- **Language**: All code comments, docstrings, and UI texts are in German
 
 ## Customization
 
 ### Adding New Metrics
 
-Edit `db.py` to add new metric types or modify the schema. Update `app.py` to display new metrics in the UI.
+Edit `database.py` to add new metric types or modify the schema. Update the corresponding page module in `ui/pages/` to display new metrics in the UI.
 
 ### Modifying Predictions
 
-Adjust prediction logic in `utils.py` functions like `generate_short_term_prediction()` and `calculate_prediction_confidence()`.
+Adjust prediction logic in `predictions.py` (PredictionEngine class) or utility functions in `utils.py`.
 
 ### Styling
 
-Custom CSS is embedded in `app.py`. Modify the `<style>` block to change colors, spacing, or typography.
+Custom CSS is defined in `ui/styling.py`. Modify the `apply_custom_styles()` function to change colors, spacing, or typography.
+
+### Adding New Pages
+
+1. Create a new module in `ui/pages/` (e.g., `new_page.py`)
+2. Implement a `render(db, sim, ...)` function
+3. Add the page to the `PAGES` dictionary in `app.py`
+4. The page will automatically appear in the sidebar navigation
 
 ## Limitations
 

@@ -28,7 +28,12 @@ def render(db, sim):
         st.session_state.current_week_start = get_week_start(today)
     
     # Hole alle Mitarbeiter
-    staff_by_category = db.get_all_staff()
+    @st.cache_data(ttl=300)  # Cache für 5 Minuten (Personal ändert sich selten)
+    def _get_all_staff_cached(_db):
+        """Gecachte Personalübersicht"""
+        return _db.get_all_staff()
+    
+    staff_by_category = _get_all_staff_cached(db)  # Gecacht
     
     # Wenn keine Person ausgewählt ist, wähle automatisch die erste Person aus
     if 'selected_staff_id' not in st.session_state or st.session_state.selected_staff_id is None:
@@ -87,6 +92,12 @@ def render(db, sim):
                         # Setze auf aktuelle Woche wenn Person ausgewählt wird
                         today = date.today()
                         st.session_state.current_week_start = get_week_start(today)
+                        # Auto-Scroll nach oben
+                        st.markdown("""
+                        <script>
+                            window.scrollTo(0, 0);
+                        </script>
+                        """, unsafe_allow_html=True)
                         st.rerun()
                 
                 st.markdown("")  # Spacing zwischen Kategorien
@@ -145,9 +156,24 @@ def render_staff_detail(db, person: dict, week_start: date):
     st.markdown("---")
     
     # Hole Daten für diese Woche
-    schedule = db.get_staff_schedule(staff_id, week_start_str)
-    actual_hours_list = db.get_actual_hours(staff_id, week_start_str)
-    overtime_data = db.calculate_overtime(staff_id, week_start_str)
+    @st.cache_data(ttl=300)  # Cache für 5 Minuten
+    def _get_staff_schedule_cached(_db, _staff_id, _week_start):
+        """Gecachter Dienstplan"""
+        return _db.get_staff_schedule(_staff_id, _week_start)
+    
+    @st.cache_data(ttl=300)  # Cache für 5 Minuten
+    def _get_actual_hours_cached(_db, _staff_id, _week_start):
+        """Gecachte tatsächliche Stunden"""
+        return _db.get_actual_hours(_staff_id, _week_start)
+    
+    @st.cache_data(ttl=300)  # Cache für 5 Minuten
+    def _calculate_overtime_cached(_db, _staff_id, _week_start):
+        """Gecachte Überstunden-Berechnung"""
+        return _db.calculate_overtime(_staff_id, _week_start)
+    
+    schedule = _get_staff_schedule_cached(db, staff_id, week_start_str)  # Gecacht
+    actual_hours_list = _get_actual_hours_cached(db, staff_id, week_start_str)  # Gecacht
+    overtime_data = _calculate_overtime_cached(db, staff_id, week_start_str)  # Gecacht
     
     # Berechne ob Woche in Vergangenheit, Zukunft oder aktuell
     today = date.today()
@@ -161,28 +187,34 @@ def render_staff_detail(db, person: dict, week_start: date):
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
+        # Fix: Use safe access for contract_hours
+        contract_hours = overtime_data.get('contract_hours', 0)
         st.markdown(f"""
         <div style="background: white; padding: 1rem; border-radius: 8px; border-left: 3px solid #667eea;">
             <div style="font-size: 0.75rem; color: #6b7280; margin-bottom: 0.5rem;">Vertragsstunden</div>
-            <div style="font-size: 1.5rem; font-weight: 700; color: #111827;">{overtime_data['contract_hours']:.0f}h</div>
+            <div style="font-size: 1.5rem; font-weight: 700; color: #111827;">{contract_hours:.0f}h</div>
         </div>
         """, unsafe_allow_html=True)
     
     with col2:
+        # Fix: Use safe access for planned_hours
+        planned_hours = overtime_data.get('planned_hours', 0)
         st.markdown(f"""
         <div style="background: white; padding: 1rem; border-radius: 8px; border-left: 3px solid #3b82f6;">
             <div style="font-size: 0.75rem; color: #6b7280; margin-bottom: 0.5rem;">Geplante Stunden</div>
-            <div style="font-size: 1.5rem; font-weight: 700; color: #111827;">{overtime_data['planned_hours']:.1f}h</div>
+            <div style="font-size: 1.5rem; font-weight: 700; color: #111827;">{planned_hours:.1f}h</div>
         </div>
         """, unsafe_allow_html=True)
     
     with col3:
         if is_past or is_current:
-            actual_color = "#10b981" if overtime_data['actual_hours'] > 0 else "#6b7280"
+            # Fix: Use safe access for actual_hours
+            actual_hours = overtime_data.get('actual_hours', 0)
+            actual_color = "#10b981" if actual_hours > 0 else "#6b7280"
             st.markdown(f"""
             <div style="background: white; padding: 1rem; border-radius: 8px; border-left: 3px solid {actual_color};">
                 <div style="font-size: 0.75rem; color: #6b7280; margin-bottom: 0.5rem;">Tatsächliche Stunden</div>
-                <div style="font-size: 1.5rem; font-weight: 700; color: #111827;">{overtime_data['actual_hours']:.1f}h</div>
+                <div style="font-size: 1.5rem; font-weight: 700; color: #111827;">{actual_hours:.1f}h</div>
             </div>
             """, unsafe_allow_html=True)
         else:
@@ -195,7 +227,13 @@ def render_staff_detail(db, person: dict, week_start: date):
     
     with col4:
         if is_past or is_current:
-            overtime = overtime_data['overtime']
+            # Fix: Use safe access for overtime, calculate if missing
+            overtime = overtime_data.get('overtime')
+            if overtime is None:
+                # Calculate overtime from other fields if available
+                planned_hours = overtime_data.get('planned_hours', 0)
+                contract_hours = overtime_data.get('contract_hours', 0)
+                overtime = planned_hours - contract_hours
             overtime_color = "#dc2626" if overtime > 0 else "#10b981" if overtime < 0 else "#6b7280"
             overtime_label = "Überstunden" if overtime > 0 else "Minusstunden" if overtime < 0 else "Ausgeglichen"
             st.markdown(f"""
@@ -241,15 +279,43 @@ def render_staff_detail(db, person: dict, week_start: date):
     cols = st.columns(7)
     
     # Erstelle Dictionary für schnellen Zugriff
-    schedule_dict = {entry['day_of_week']: entry for entry in schedule}
+    # Fix: Calculate day_of_week from date if missing
+    schedule_dict = {}
+    for entry in schedule:
+        if 'day_of_week' in entry:
+            day_of_week = entry['day_of_week']
+        elif 'date' in entry:
+            # Calculate day_of_week from date
+            entry_date_str = entry['date']
+            if isinstance(entry_date_str, str):
+                entry_date = datetime.strptime(entry_date_str, '%Y-%m-%d').date()
+            else:
+                entry_date = entry_date_str
+            day_of_week = (entry_date - week_start).days
+        else:
+            # Skip entries without date or day_of_week
+            continue
+        
+        if 0 <= day_of_week <= 6:
+            schedule_dict[day_of_week] = entry
     actual_dict = {}
     for entry in actual_hours_list:
+        # Fix: Use safe access for date, skip if missing
+        entry_date_str = entry.get('date')
+        if entry_date_str is None:
+            # Skip entries without date
+            continue
+        
         # Handle date - could be string or date object
-        entry_date_str = entry['date']
         if isinstance(entry_date_str, str):
-            entry_date = datetime.strptime(entry_date_str, '%Y-%m-%d').date()
+            try:
+                entry_date = datetime.strptime(entry_date_str, '%Y-%m-%d').date()
+            except (ValueError, TypeError):
+                # Skip entries with invalid date format
+                continue
         else:
             entry_date = entry_date_str
+        
         day_of_week = (entry_date - week_start).days
         if 0 <= day_of_week <= 6:
             actual_dict[day_of_week] = entry
@@ -272,21 +338,33 @@ def render_staff_detail(db, person: dict, week_start: date):
             </div>
             """, unsafe_allow_html=True)
             
-            # Geplante Stunden
+            # Geplante Stunden oder Urlaub
             if i in schedule_dict:
                 entry = schedule_dict[i]
-                planned_hours = entry['planned_hours']
-                shift_info = ""
-                if entry.get('shift_start') and entry.get('shift_end'):
-                    shift_info = f"<div style='font-size: 0.65rem; color: #9ca3af; margin-top: 0.25rem;'>{entry['shift_start']} - {entry['shift_end']}</div>"
+                is_vacation = entry.get('is_vacation', False)
                 
-                st.markdown(f"""
-                <div style="background: #eff6ff; padding: 0.5rem; border-radius: 4px; margin-bottom: 0.5rem;">
-                    <div style="font-size: 0.7rem; color: #6b7280; margin-bottom: 0.25rem;">Geplant</div>
-                    <div style="font-size: 1rem; font-weight: 700; color: #3b82f6;">{planned_hours:.1f}h</div>
-                    {shift_info}
-                </div>
-                """, unsafe_allow_html=True)
+                if is_vacation:
+                    # Urlaub anzeigen
+                    st.markdown(f"""
+                    <div style="background: #fef3c7; padding: 0.5rem; border-radius: 4px; margin-bottom: 0.5rem; border-left: 3px solid #f59e0b;">
+                        <div style="font-size: 0.7rem; color: #92400e; margin-bottom: 0.25rem;">Urlaub</div>
+                        <div style="font-size: 0.9rem; font-weight: 600; color: #d97706;">🏖️ Frei</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    # Normale Schicht
+                    planned_hours = entry.get('planned_hours', 0.0)
+                    shift_info = ""
+                    if entry.get('shift_start') and entry.get('shift_end'):
+                        shift_info = f"<div style='font-size: 0.65rem; color: #9ca3af; margin-top: 0.25rem;'>{entry['shift_start']} - {entry['shift_end']}</div>"
+                    
+                    st.markdown(f"""
+                    <div style="background: #eff6ff; padding: 0.5rem; border-radius: 4px; margin-bottom: 0.5rem;">
+                        <div style="font-size: 0.7rem; color: #6b7280; margin-bottom: 0.25rem;">Geplant</div>
+                        <div style="font-size: 1rem; font-weight: 700; color: #3b82f6;">{planned_hours:.1f}h</div>
+                        {shift_info}
+                    </div>
+                    """, unsafe_allow_html=True)
             else:
                 st.markdown(f"""
                 <div style="background: #f9fafb; padding: 0.5rem; border-radius: 4px; margin-bottom: 0.5rem;">

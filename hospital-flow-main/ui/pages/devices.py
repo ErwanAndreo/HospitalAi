@@ -12,16 +12,28 @@ from utils import (
     get_status_color, calculate_inventory_status, calculate_capacity_status,
     format_duration_minutes, get_department_color, get_system_status,
     get_metric_severity_for_load, get_metric_severity_for_count, get_metric_severity_for_free,
-    get_explanation_score_color, get_maintenance_duration
+    get_explanation_score_color, get_maintenance_duration, convert_utc_to_local
 )
 from ui.components import render_badge, render_empty_state
 
+
+@st.cache_data(ttl=60)
+def _get_device_maintenance_urgencies_cached(_db):
+    """Gecachte Geräte-Wartungsdringlichkeiten"""
+    return _db.get_device_maintenance_urgencies()
 
 def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get_cached_capacity=None):
     """Rendert die Gerätewartung-Seite"""
     st.markdown("### Gerätewartungs-Dringlichkeitsanalyse")
     
-    devices = db.get_device_maintenance_urgencies()
+    # Verwende Background-Daten für sofortigen Zugriff
+    if 'background_data' in st.session_state and st.session_state.background_data:
+        devices = st.session_state.background_data.get('devices', [])
+        # Fallback wenn Liste leer ist
+        if not devices:
+            devices = _get_device_maintenance_urgencies_cached(db)
+    else:
+        devices = _get_device_maintenance_urgencies_cached(db)  # Fallback: Gecacht
     
     if devices:
         # Dringlichkeitszusammenfassung
@@ -47,7 +59,9 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
             # SQLite gibt BOOLEAN als INTEGER (0/1) zurück, daher explizite Prüfung
             maintenance_confirmed = device.get('maintenance_confirmed', False)
             maintenance_confirmed = bool(maintenance_confirmed) if maintenance_confirmed is not None else False
-            if scheduled_maintenance and maintenance_confirmed:
+            
+            # Prüfe ob scheduled_maintenance nicht None/leer ist UND maintenance_confirmed True ist
+            if scheduled_maintenance and scheduled_maintenance != '' and maintenance_confirmed:
                 devices_with_scheduled.append(device)
             else:
                 devices_without_scheduled.append(device)
@@ -70,21 +84,18 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
         # Importiere Dringlichkeitsberechnung und max hours
         from utils import get_max_usage_hours
         
-        # Mapping für Abteilungsnamen ins Deutsche
-        department_map = {
+        # Mapping für Abteilungsnamen ins Deutsche - verwende zentrales Mapping
+        from utils import get_department_name_mapping
+        department_map = get_department_name_mapping()
+        department_map.update({
             'Radiology': 'Radiologie',
-            'ER': 'Notaufnahme',
-            'ICU': 'Intensivstation',
-            'Cardiology': 'Kardiologie',
-            'Surgery': 'Chirurgie',
             'General Ward': 'Allgemeinstation',
             'Neurology': 'Neurologie',
             'Pediatrics': 'Pädiatrie',
             'Oncology': 'Onkologie',
-            'Orthopedics': 'Orthopädie',
             'Maternity': 'Geburtshilfe',
             'Other': 'Andere',
-        }
+        })
         
         # Hilfsfunktion zum Rendern eines Geräts
         def render_device_card(device):
@@ -147,40 +158,121 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
             days_display = f"{days_until_due} Tage" if days_until_due is not None else "N/V"
             last_maintenance_display = f"{last_maintenance_str} (vor {days_since_last} Tagen)" if last_maintenance_str and days_since_last is not None else (last_maintenance_str if last_maintenance_str else "N/V")
             
-            # Prüfe ob Wartung geplant ist
+            # Prüfe ob Wartung geplant ist oder aktiv ist
             scheduled_maintenance = device.get('scheduled_maintenance_time')
             # SQLite gibt BOOLEAN als INTEGER (0/1) zurück, daher explizite Prüfung
             maintenance_confirmed = device.get('maintenance_confirmed', False)
             maintenance_confirmed = bool(maintenance_confirmed) if maintenance_confirmed is not None else False
-            scheduled_display = ""
-            if scheduled_maintenance and maintenance_confirmed:
-                try:
-                    if isinstance(scheduled_maintenance, str):
-                        scheduled_dt = datetime.strptime(scheduled_maintenance, '%Y-%m-%d %H:%M:%S')
-                    else:
-                        scheduled_dt = scheduled_maintenance
-                    days_until_scheduled = (scheduled_dt - datetime.now()).days
+            is_in_maintenance = device.get('is_in_maintenance', False)
+            maintenance_end_time_str = device.get('maintenance_end_time')
+            
+            scheduled_display = "Keine"
+            scheduled_display_color = "#6b7280"  # Grau für "Keine"
+            maintenance_status_badge = ""
+            
+            if is_in_maintenance:
+                # Gerät ist aktuell in Wartung
+                scheduled_display = "🔧 In Wartung"
+                scheduled_display_color = "#F59E0B"  # Orange für aktive Wartung
+                
+                # Berechne verbleibende Zeit
+                if maintenance_end_time_str:
+                    try:
+                        from datetime import timezone
+                        if isinstance(maintenance_end_time_str, str):
+                            maintenance_end_dt = None
+                            date_formats = [
+                                '%Y-%m-%dT%H:%M:%S.%f',
+                                '%Y-%m-%dT%H:%M:%S',
+                                '%Y-%m-%d %H:%M:%S.%f',
+                                '%Y-%m-%d %H:%M:%S',
+                                '%Y-%m-%d %H:%M',
+                                '%Y-%m-%dT%H:%M'
+                            ]
+                            for fmt in date_formats:
+                                try:
+                                    maintenance_end_dt = datetime.strptime(maintenance_end_time_str, fmt)
+                                    if maintenance_end_dt.tzinfo is None:
+                                        maintenance_end_dt = maintenance_end_dt.replace(tzinfo=timezone.utc)
+                                    break
+                                except:
+                                    continue
+                            
+                            if maintenance_end_dt is None:
+                                try:
+                                    maintenance_end_dt = datetime.fromisoformat(maintenance_end_time_str.replace('Z', '+00:00'))
+                                    if maintenance_end_dt.tzinfo is None:
+                                        maintenance_end_dt = maintenance_end_dt.replace(tzinfo=timezone.utc)
+                                except:
+                                    maintenance_end_dt = None
+                        else:
+                            maintenance_end_dt = maintenance_end_time_str
+                            if maintenance_end_dt and maintenance_end_dt.tzinfo is None:
+                                maintenance_end_dt = maintenance_end_dt.replace(tzinfo=timezone.utc)
+                        
+                        if maintenance_end_dt:
+                            now_utc = datetime.now(timezone.utc)
+                            remaining_seconds = (maintenance_end_dt - now_utc).total_seconds()
+                            if remaining_seconds > 0:
+                                remaining_hours = int(remaining_seconds // 3600)
+                                remaining_minutes = int((remaining_seconds % 3600) // 60)
+                                if remaining_hours > 0:
+                                    remaining_time_str = f"{remaining_hours}h {remaining_minutes}m"
+                                else:
+                                    remaining_time_str = f"{remaining_minutes}m"
+                                scheduled_display = f"🔧 In Wartung ({remaining_time_str})"
+                    except:
+                        pass
+                
+                maintenance_status_badge = render_badge("IN WARTUNG", "wartung")
+            elif scheduled_maintenance and maintenance_confirmed:
+                scheduled_dt = None
+                # Versuche verschiedene Datumsformate zu parsen
+                if isinstance(scheduled_maintenance, str):
+                    # Versuche verschiedene Formate
+                    date_formats = [
+                        '%Y-%m-%d %H:%M:%S',
+                        '%Y-%m-%d %H:%M',
+                        '%Y-%m-%dT%H:%M:%S',
+                        '%Y-%m-%dT%H:%M:%S.%f',
+                        '%Y-%m-%d'
+                    ]
+                    for fmt in date_formats:
+                        try:
+                            scheduled_dt = datetime.strptime(scheduled_maintenance, fmt)
+                            break
+                        except:
+                            continue
+                else:
+                    scheduled_dt = scheduled_maintenance
+                
+                if scheduled_dt:
+                    # Konvertiere UTC zu lokaler Zeit für Anzeige
+                    scheduled_dt_local = convert_utc_to_local(scheduled_dt)
+                    if scheduled_dt_local:
+                        scheduled_dt = scheduled_dt_local
                     hours_until_scheduled = (scheduled_dt - datetime.now()).total_seconds() / 3600
                     if hours_until_scheduled < 0:
-                        scheduled_display = f"⚠️ Überfällig (seit {abs(int(hours_until_scheduled))}h)"
+                        scheduled_display = f"⚠️ {scheduled_dt.strftime('%d.%m.%Y %H:%M')}"
+                        scheduled_display_color = "#DC2626"  # Rot für überfällig
                     elif hours_until_scheduled < 24:
-                        scheduled_display = f"📅 Heute in {int(hours_until_scheduled)}h"
+                        scheduled_display = f"Heute {scheduled_dt.strftime('%H:%M')}"
+                        scheduled_display_color = "#F59E0B"  # Orange für heute
                     else:
-                        scheduled_display = f"📅 In {days_until_scheduled} Tagen ({scheduled_dt.strftime('%d.%m.%Y %H:%M')})"
-                except:
-                    scheduled_display = "📅 Geplant"
-            
-            # Baue scheduled_display HTML separat
-            scheduled_html = f'<div style="font-size: 0.75rem; color: #667eea; margin-top: 0.25rem;">{scheduled_display}</div>' if scheduled_display else ''
+                        scheduled_display = scheduled_dt.strftime('%d.%m.%Y %H:%M')
+                        scheduled_display_color = "#667eea"  # Blau für geplant
+                else:
+                    # Falls Parsing komplett fehlschlägt, zeige den rohen Wert
+                    scheduled_display = str(scheduled_maintenance)
+                    scheduled_display_color = "#667eea"
             
             # Baue HTML-Content ohne verschachtelte f-Strings
             html_content = (
                 f'<div style="background: white; padding: 1rem; border-radius: 8px; margin-bottom: 0.75rem; border-left: 4px solid {urgency_color}; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">'
-                f'<div style="display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr 1fr 1fr 1fr; gap: 1rem; align-items: center;">'
+                f'<div style="display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr; gap: 1rem; align-items: center;">'
                 f'<div>'
-                f'<div style="font-weight: 600; color: #1f2937; margin-bottom: 0.25rem;">{device.get("device_type", "N/V")}</div>'
+                f'<div style="font-weight: 600; color: #1f2937; margin-bottom: 0.25rem; display: flex; align-items: center; gap: 0.5rem;">{device.get("device_type", "N/V")} {maintenance_status_badge}</div>'
                 f'<div style="font-size: 0.75rem; color: #6b7280;">{device.get("device_id", "N/V")} • {department_de}</div>'
-                f'{scheduled_html}'
                 f'</div>'
                 f'<div>'
                 f'<div style="font-size: 0.75rem; color: #6b7280; margin-bottom: 0.25rem;">Gerätetyp</div>'
@@ -201,6 +293,10 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                 f'<div>'
                 f'<div style="font-size: 0.75rem; color: #6b7280; margin-bottom: 0.25rem;">Empfohlenes Wartungsfenster</div>'
                 f'<div style="font-weight: 600; color: #667eea; font-size: 0.875rem;">{recommended_window}</div>'
+                f'</div>'
+                f'<div>'
+                f'<div style="font-size: 0.75rem; color: #6b7280; margin-bottom: 0.25rem;">Geplante Wartung</div>'
+                f'<div style="font-weight: 600; color: {scheduled_display_color}; font-size: 0.875rem;">{scheduled_display}</div>'
                 f'</div>'
                 f'<div>'
                 f'{urgency_badge}'
@@ -235,6 +331,14 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                                 expected_patients = suggestion['expected_patients']
                                 reason = suggestion['reason']
                                 
+                                # Konvertiere UTC zu lokaler Zeit für Anzeige
+                                start_time_local = convert_utc_to_local(start_time)
+                                end_time_local = convert_utc_to_local(end_time)
+                                if start_time_local:
+                                    start_time = start_time_local
+                                if end_time_local:
+                                    end_time = end_time_local
+                                
                                 # Score-Farbe
                                 if score >= 0.8:
                                     score_color = "#10B981"  # Grün
@@ -259,12 +363,41 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                                     """, unsafe_allow_html=True)
                                 with col3:
                                     if st.button("✅ Auswählen", key=f"select_{device_id}_{idx}"):
-                                        st.session_state[f'selected_time_{device_id}'] = start_time
-                                        st.session_state[f'selected_duration_{device_id}'] = suggestion['duration_minutes']
-                                        st.session_state[f'selected_date_{device_id}'] = start_time.date()
-                                        st.session_state[f'selected_time_input_{device_id}'] = start_time.time()
-                                        st.success(f"Zeit ausgewählt: {start_time.strftime('%d.%m.%Y %H:%M')}")
-                                        st.rerun()
+                                        # Direkt Wartung bestätigen
+                                        try:
+                                            if not device_id:
+                                                st.error("❌ Keine Geräte-ID gefunden!")
+                                            else:
+                                                with st.spinner("Wartung wird bestätigt..."):
+                                                    success, error_msg = db.confirm_maintenance(
+                                                        device_id=str(device_id),
+                                                        scheduled_time=start_time,
+                                                        duration_minutes=int(suggestion['duration_minutes']),
+                                                        confirmed_by="System"
+                                                    )
+                                                    
+                                                    if success:
+                                                        st.success(f"✅ Wartung bestätigt für {start_time.strftime('%d.%m.%Y %H:%M')}")
+                                                        # Lösche Vorschläge und ausgewählte Werte aus Session State
+                                                        if f'suggestions_{device_id}' in st.session_state:
+                                                            del st.session_state[f'suggestions_{device_id}']
+                                                        if f'selected_time_{device_id}' in st.session_state:
+                                                            del st.session_state[f'selected_time_{device_id}']
+                                                        if f'selected_duration_{device_id}' in st.session_state:
+                                                            del st.session_state[f'selected_duration_{device_id}']
+                                                        if f'selected_date_{device_id}' in st.session_state:
+                                                            del st.session_state[f'selected_date_{device_id}']
+                                                        if f'selected_time_input_{device_id}' in st.session_state:
+                                                            del st.session_state[f'selected_time_input_{device_id}']
+                                                        st.cache_data.clear()  # Cache leeren nach wichtiger Aktion
+                                                        st.rerun()
+                                                    else:
+                                                        error_display = error_msg if error_msg else "Unbekannter Fehler"
+                                                        st.error(f"❌ Fehler beim Bestätigen der Wartung für Gerät {device_id}: {error_display}")
+                                        except Exception as e:
+                                            st.error(f"❌ Fehler: {str(e)}")
+                                            with st.expander("🔍 Fehlerdetails anzeigen"):
+                                                st.code(str(e))
                                 st.markdown("---")
                         else:
                             st.info("Keine Vorschläge verfügbar. Bitte versuchen Sie es später erneut.")
@@ -377,20 +510,19 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                                                 del st.session_state[f'selected_date_{device_id}']
                                             if f'selected_time_input_{device_id}' in st.session_state:
                                                 del st.session_state[f'selected_time_input_{device_id}']
+                                            st.cache_data.clear()  # Cache leeren nach wichtiger Aktion
                                             st.rerun()
                                         else:
                                             error_display = error_msg if error_msg else "Unbekannter Fehler"
                                             st.error(f"❌ Fehler beim Bestätigen der Wartung für Gerät {device_id}: {error_display}")
                                     except Exception as e:
                                         st.error(f"❌ Ausnahme beim Bestätigen: {str(e)}")
-                                        import traceback
                                         with st.expander("🔍 Fehlerdetails anzeigen"):
-                                            st.code(traceback.format_exc())
+                                            st.code(str(e))
                             except Exception as e:
                                 st.error(f"❌ Fehler: {str(e)}")
-                                import traceback
                                 with st.expander("🔍 Fehlerdetails anzeigen"):
-                                    st.code(traceback.format_exc())
+                                    st.code(str(e))
                     
                     # Falls Wartung bereits geplant ist, zeige Option zum Abschließen
                     # SQLite gibt BOOLEAN als INTEGER (0/1) zurück, daher explizite Prüfung
@@ -403,6 +535,7 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                             success = db.complete_maintenance(device_id)
                             if success:
                                 st.success("✅ Wartung als abgeschlossen markiert. Neue Wartungsintervalle wurden berechnet.")
+                                st.cache_data.clear()  # Cache leeren nach wichtiger Aktion
                                 st.rerun()
                             else:
                                 st.error("❌ Fehler beim Abschließen der Wartung.")
@@ -454,4 +587,4 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
         )
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.markdown(render_empty_state("🔧", "Keine Gerätedaten verfügbar", "Gerätewartungsdaten werden hier angezeigt, sobald sie verfügbar sind"), unsafe_allow_html=True)
+        st.markdown(render_empty_state("🔧", "Keine Gerätedaten verfügbar", "Es wurden noch keine Geräte in der Datenbank hinterlegt. Die Geräte werden automatisch beim nächsten App-Start generiert, falls sie fehlen."), unsafe_allow_html=True)

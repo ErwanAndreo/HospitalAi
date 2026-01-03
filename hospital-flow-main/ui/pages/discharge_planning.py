@@ -192,10 +192,16 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
     st.markdown("### Entlassungsplanungs-Übersicht")
     st.markdown("Aggregierte Entlassungsmetriken nach Abteilung")
     
-    discharge = db.get_discharge_planning()
+    @st.cache_data(ttl=60)
+    def _get_discharge_planning_cached(_db):
+        """Gecachte Entlassungsplanung"""
+        return _db.get_discharge_planning()
+    
+    discharge = _get_discharge_planning_cached(db)  # Gecacht
     
     if discharge:
         df_disch = pd.DataFrame(discharge)
+        
         # Rename columns for German legend/axis
         df_disch = df_disch.rename(columns={
             'ready_for_discharge_count': 'Entlassungsbereit',
@@ -203,9 +209,14 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
         })
 
         # Zusammenfassende Metriken
-        total_ready = df_disch['Entlassungsbereit'].sum()
-        total_pending = df_disch['Ausstehend'].sum()
-        avg_los = df_disch['avg_length_of_stay_hours'].mean()
+        total_ready = df_disch['Entlassungsbereit'].sum() if 'Entlassungsbereit' in df_disch.columns else 0
+        total_pending = df_disch['Ausstehend'].sum() if 'Ausstehend' in df_disch.columns else 0
+        
+        # Fix: Use safe access for avg_length_of_stay_hours, calculate default if missing
+        if 'avg_length_of_stay_hours' in df_disch.columns:
+            avg_los = df_disch['avg_length_of_stay_hours'].mean()
+        else:
+            avg_los = 0  # Default value if column doesn't exist
         
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -227,6 +238,10 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                 ready = dept_data.get('Entlassungsbereit', dept_data.get('ready_for_discharge_count', 0))
                 pending = dept_data.get('Ausstehend', dept_data.get('pending_discharge_count', 0))
                 avg_los = dept_data.get('avg_length_of_stay_hours', 0)
+                
+                # Fix: Use safe access for discharge_capacity_utilization
+                capacity_utilization = dept_data.get('discharge_capacity_utilization', 0)
+                
                 st.markdown(f"""
                 <div style="background: white; padding: 1.5rem; border-radius: 8px; margin-bottom: 1rem; border-top: 4px solid {dept_color};">
                     <h4 style="margin: 0 0 1rem 0; color: {dept_color};">{dept_data['department']}</h4>
@@ -245,7 +260,7 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
                     <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e5e7eb;">
                         <div style="font-size: 0.75rem; color: #9ca3af; margin-bottom: 0.25rem;">Kapazitätsauslastung</div>
                         <div style="background: #e5e7eb; height: 8px; border-radius: 4px; overflow: hidden;">
-                            <div style="background: {dept_color}; height: 100%; width: {dept_data['discharge_capacity_utilization']*100}%;"></div>
+                            <div style="background: {dept_color}; height: 100%; width: {capacity_utilization*100}%;"></div>
                         </div>
                     </div>
                 </div>
@@ -277,23 +292,25 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
             st.plotly_chart(fig, use_container_width=True)
         
         with col2:
-            # Mapping for department names (English to German)
-            department_map = {
-                'ER': 'Notaufnahme',
-                'ICU': 'Intensivstation',
-                'Surgery': 'Chirurgie',
+            # Mapping for department names (English to German) - verwende zentrales Mapping
+            from utils import get_department_name_mapping
+            department_map = get_department_name_mapping()
+            department_map.update({
                 'General Ward': 'Allgemeinstation',
-                'Cardiology': 'Kardiologie',
                 'Neurology': 'Neurologie',
                 'Pediatrics': 'Pädiatrie',
                 'Oncology': 'Onkologie',
-                'Orthopedics': 'Orthopädie',
                 'Maternity': 'Geburtshilfe',
                 'Radiology': 'Radiologie',
                 'Other': 'Andere'
-            }
+            })
             # Deutsche Abteilungsspalte für Plotting hinzufügen
             df_disch['Abteilung'] = df_disch['department'].map(department_map).fillna(df_disch['department'])
+            
+            # Fix: Check if avg_length_of_stay_hours column exists, create default if missing
+            if 'avg_length_of_stay_hours' not in df_disch.columns:
+                df_disch['avg_length_of_stay_hours'] = 0
+            
             fig = px.bar(
                 df_disch,
                 x='Abteilung',

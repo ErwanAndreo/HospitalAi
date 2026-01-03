@@ -1,61 +1,286 @@
 """
 Hilfsfunktionen für HospitalFlow
-Vorhersagen, Berechnungen und Formatierungshelfer
+
+Diese Datei enthält:
+- Vorhersage-Algorithmen (Patientenzugang, Bettenbedarf)
+- Berechnungsfunktionen (Inventarstatus, Kapazitätsstatus, Verbrauch)
+- Formatierungshelfer (Zeit, Dauer, Farben)
+- Status- und Schweregrad-Berechnungen
+
+Alle Funktionen sind darauf ausgelegt, realistische Krankenhausmetriken
+zu berechnen und zu formatieren.
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 import random
+from zoneinfo import ZoneInfo
+
+# Lokale Zeitzone (UTC+1 für Berlin)
+LOCAL_TIMEZONE = 'Europe/Berlin'
 
 
 def calculate_prediction_confidence(base_value: float, time_horizon: int) -> float:
-    """Berechne Prognose-Vertrauen basierend auf dem Zeithorizont"""
+    """
+    Berechnet das Prognose-Vertrauen basierend auf dem Zeithorizont.
+    
+    Das Vertrauen sinkt mit zunehmendem Zeithorizont, da kurzfristige
+    Vorhersagen zuverlässiger sind als langfristige.
+    
+    Args:
+        base_value (float): Basis-Vorhersagewert (wird hier nicht verwendet, aber für zukünftige Erweiterungen)
+        time_horizon (int): Zeithorizont in Minuten (z.B. 5, 10, 15)
+    
+    Returns:
+        float: Vertrauen zwischen 0.6 und 1.0 (gerundet auf 2 Dezimalstellen)
+    """
     # Kürzere Horizonte = höheres Vertrauen
+    # Formel: Mindestens 0.6, sinkt linear mit Zeithorizont
+    # Bei 0 Minuten: 1.0, bei 60+ Minuten: 0.6
     confidence = max(0.6, 1.0 - (time_horizon / 60) * 0.3)
     return round(confidence, 2)
 
 
+def round_timestamp_to_seconds(dt):
+    """
+    Rundet einen Timestamp auf Sekunden (entfernt Millisekunden/Mikrosekunden).
+    
+    Unterstützt:
+    - datetime-Objekte
+    - pandas Timestamp/Series
+    - String-Timestamps
+    
+    Args:
+        dt: Timestamp als datetime, pandas Timestamp, pandas Series oder String
+    
+    Returns:
+        datetime oder pandas Series mit auf Sekunden gerundeten Timestamps
+    """
+    import pandas as pd
+    
+    if isinstance(dt, pd.Series):
+        # Für pandas Series: runde jeden Wert auf Sekunden
+        return pd.to_datetime(dt).dt.floor('S')
+    elif isinstance(dt, pd.Timestamp):
+        # Für pandas Timestamp: runde auf Sekunden
+        return dt.floor('S')
+    elif isinstance(dt, datetime):
+        # Für datetime: entferne Mikrosekunden
+        return dt.replace(microsecond=0)
+    elif isinstance(dt, str):
+        # Für String: parse und runde
+        try:
+            parsed = pd.to_datetime(dt)
+            return parsed.floor('S').to_pydatetime()
+        except:
+            return dt
+    else:
+        # Fallback: versuche zu konvertieren
+        try:
+            parsed = pd.to_datetime(dt)
+            return parsed.floor('S').to_pydatetime()
+        except:
+            return dt
+
+
+def aggregate_to_30_seconds(df, timestamp_col='timestamp', value_col='value', agg_func='mean'):
+    """
+    Aggregiert einen DataFrame auf 30-Sekunden-Intervalle.
+    
+    Rundet Timestamps auf 30-Sekunden-Intervalle (z.B. 00:00:00, 00:00:30, 00:01:00)
+    und aggregiert die Werte innerhalb jedes Intervalls.
+    
+    Args:
+        df: pandas DataFrame mit Zeitreihen-Daten
+        timestamp_col: Name der Timestamp-Spalte (Standard: 'timestamp')
+        value_col: Name der Wert-Spalte (Standard: 'value')
+        agg_func: Aggregationsfunktion ('mean', 'last', 'first', 'max', 'min')
+    
+    Returns:
+        pandas DataFrame mit aggregierten Daten auf 30-Sekunden-Intervalle
+    """
+    import pandas as pd
+    
+    if df.empty or timestamp_col not in df.columns:
+        return df
+    
+    # Erstelle Kopie des DataFrames
+    df_agg = df.copy()
+    
+    # Konvertiere Timestamp-Spalte zu datetime
+    df_agg[timestamp_col] = pd.to_datetime(df_agg[timestamp_col])
+    
+    # Runde auf 30-Sekunden-Intervalle
+    # Verwende floor um auf das nächste 30-Sekunden-Intervall abzurunden
+    df_agg['_30s_interval'] = df_agg[timestamp_col].dt.floor('30S')
+    
+    # Aggregiere nach 30-Sekunden-Intervallen
+    if agg_func == 'mean':
+        agg_dict = {value_col: 'mean'}
+    elif agg_func == 'last':
+        agg_dict = {value_col: 'last'}
+    elif agg_func == 'first':
+        agg_dict = {value_col: 'first'}
+    elif agg_func == 'max':
+        agg_dict = {value_col: 'max'}
+    elif agg_func == 'min':
+        agg_dict = {value_col: 'min'}
+    else:
+        agg_dict = {value_col: 'mean'}  # Default
+    
+    # Behalte alle anderen Spalten (z.B. 'department', 'Abteilung' für Farben)
+    other_cols = [col for col in df_agg.columns if col not in [timestamp_col, value_col, '_30s_interval']]
+    if other_cols:
+        # Für andere Spalten: nimm den ersten Wert pro Intervall
+        for col in other_cols:
+            agg_dict[col] = 'first'
+    
+    # Gruppiere und aggregiere
+    df_agg = df_agg.groupby('_30s_interval', as_index=False).agg(agg_dict)
+    
+    # Ersetze _30s_interval durch timestamp
+    df_agg[timestamp_col] = df_agg['_30s_interval']
+    df_agg = df_agg.drop(columns=['_30s_interval'])
+    
+    # Sortiere nach Timestamp
+    df_agg = df_agg.sort_values(timestamp_col)
+    
+    return df_agg
+
+
+def convert_utc_to_local(utc_timestamp):
+    """
+    Konvertiert einen UTC-Timestamp in lokale Zeit (Europe/Berlin).
+    
+    Unterstützt verschiedene Eingabeformate:
+    - datetime-Objekte (mit oder ohne timezone)
+    - String-Timestamps (ISO-Format oder SQLite-Format)
+    
+    Args:
+        utc_timestamp: UTC-Timestamp als datetime, String oder pandas Timestamp
+    
+    Returns:
+        datetime: Zeitstempel in lokaler Zeitzone (timezone-naive für einfache Anzeige)
+    """
+    # Handle pandas Timestamp
+    if hasattr(utc_timestamp, 'to_pydatetime'):
+        utc_timestamp = utc_timestamp.to_pydatetime()
+    
+    # Parse String zu datetime
+    if isinstance(utc_timestamp, str):
+        try:
+            # Versuche ISO-Format (z.B. "2024-01-01T12:00:00Z" oder "2024-01-01T12:00:00+00:00")
+            dt = datetime.fromisoformat(utc_timestamp.replace('Z', '+00:00'))
+        except:
+            try:
+                # Versuche SQLite-Format mit Mikrosekunden
+                dt = datetime.strptime(utc_timestamp, '%Y-%m-%d %H:%M:%S.%f')
+                dt = dt.replace(tzinfo=timezone.utc)
+            except:
+                try:
+                    # Versuche SQLite-Format ohne Mikrosekunden
+                    dt = datetime.strptime(utc_timestamp, '%Y-%m-%d %H:%M:%S')
+                    dt = dt.replace(tzinfo=timezone.utc)
+                except:
+                    # Fallback: return None wenn Parsing fehlschlägt
+                    return None
+    elif isinstance(utc_timestamp, datetime):
+        dt = utc_timestamp
+    else:
+        return None
+    
+    # Stelle sicher, dass datetime timezone-aware ist (behandle als UTC wenn nicht gesetzt)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    
+    # Konvertiere zu lokaler Zeitzone
+    local_dt = dt.astimezone(ZoneInfo(LOCAL_TIMEZONE))
+    
+    # Entferne timezone-Info für einfache Anzeige (da wir in lokaler Zeit sind)
+    return local_dt.replace(tzinfo=None)
+
+
 def format_time_ago(timestamp: str) -> str:
-    """Formatiere Zeitstempel als relative Zeit"""
+    """
+    Formatiert einen Zeitstempel als relative Zeit (z.B. "vor 5 Min.", "vor 2 Std.").
+    
+    Unterstützt verschiedene Zeitstempelformate:
+    - ISO-Format (z.B. "2024-01-01T12:00:00Z")
+    - SQLite-Format mit/ohne Mikrosekunden (z.B. "2024-01-01 12:00:00.000000")
+    - datetime-Objekte
+    
+    Die Zeitdifferenz wird korrekt berechnet, auch wenn Timestamps in UTC gespeichert sind.
+    
+    Args:
+        timestamp (str): Zeitstempel als String oder datetime-Objekt (in UTC)
+    
+    Returns:
+        str: Formatierte relative Zeit (z.B. "gerade eben", "vor 5 Min.", "vor 2 Std.", "vor 3 Tg.")
+    """
+    # ===== ZEITSTEMPEL PARSEN =====
+    # Versuche verschiedene Zeitstempelformate zu parsen
     if isinstance(timestamp, str):
         try:
-            # Versuche zuerst ISO-Format
+            # Versuche zuerst ISO-Format (z.B. "2024-01-01T12:00:00Z")
             dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            # Stelle sicher, dass es timezone-aware ist
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
         except:
             try:
                 # Versuche SQLite-Datumsformat mit Mikrosekunden
                 # SQLite CURRENT_TIMESTAMP gibt UTC zurück, also als UTC behandeln
                 dt = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S.%f')
+                dt = dt.replace(tzinfo=timezone.utc)
             except:
                 try:
                     # Versuche SQLite-Datumsformat ohne Mikrosekunden
                     dt = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                    dt = dt.replace(tzinfo=timezone.utc)
                 except:
                     # Fallback auf "kürzlich", wenn das Parsen fehlschlägt
                     return "kürzlich"
     else:
         dt = timestamp
+        # Stelle sicher, dass es timezone-aware ist (behandle als UTC wenn nicht gesetzt)
+        if hasattr(dt, 'tzinfo') and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
     
-    # SQLite CURRENT_TIMESTAMP und datetime.now(timezone.utc) geben UTC zurück
+    # ===== ZEITDIFFERENZ BERECHNEN =====
     # Vergleiche UTC-Zeit mit UTC-Zeit für korrekte Zeitdifferenz
-    from datetime import timezone
-    now = datetime.now(timezone.utc).replace(tzinfo=None)  # Remove timezone info for comparison with naive dt
-    diff = now - dt
+    now_utc = datetime.now(timezone.utc)
+    diff = now_utc - dt
     
+    # ===== RELATIVE ZEIT FORMATIEREN =====
+    # Formatiere basierend auf der Zeitdifferenz
     if diff.total_seconds() < 60:
-        return "gerade eben"
-    elif diff.total_seconds() < 3600:
+        return "gerade eben"  # Weniger als 1 Minute
+    elif diff.total_seconds() < 3600:  # Weniger als 1 Stunde
         mins = int(diff.total_seconds() / 60)
         return f"vor {mins} Min."
-    elif diff.total_seconds() < 86400:
+    elif diff.total_seconds() < 86400:  # Weniger als 1 Tag
         hours = int(diff.total_seconds() / 3600)
         return f"vor {hours} Std."
-    else:
+    else:  # 1 Tag oder mehr
         days = int(diff.total_seconds() / 86400)
         return f"vor {days} Tg."
 
 
 def get_severity_color(severity: str) -> str:
-    """Farbe für Schweregrad-Badge ermitteln"""
+    """
+    Ermittelt die Farbe für einen Schweregrad-Badge.
+    
+    Farben basieren auf der Schweregrad-Skala:
+    - Kritisch/Hoch: Rot (höchste Priorität)
+    - Mittel: Bernstein/Gelb (mittlere Priorität)
+    - Niedrig: Smaragd/Grün (niedrige Priorität)
+    
+    Args:
+        severity (str): Schweregrad auf Deutsch oder Englisch
+                       ("hoch"/"high", "mittel"/"medium", "niedrig"/"low", "kritisch"/"critical")
+    
+    Returns:
+        str: Hex-Farbcode (z.B. "#DC2626" für rot)
+    """
     farben = {
         "hoch": "#DC2626",      # rot-600
         "mittel": "#F59E0B",    # bernstein-500
@@ -67,31 +292,67 @@ def get_severity_color(severity: str) -> str:
         "low": "#10B981",
         "critical": "#991B1B",
     }
-    return farben.get(severity.lower(), "#6B7280")
+    return farben.get(severity.lower(), "#6B7280")  # Standard: Grau
 
 
 def get_priority_color(priority: str) -> str:
-    """Farbe für Prioritäts-Badge ermitteln"""
+    """
+    Ermittelt die Farbe für einen Prioritäts-Badge.
+    
+    Priorität verwendet dieselbe Farbcodierung wie Schweregrad.
+    
+    Args:
+        priority (str): Priorität auf Deutsch oder Englisch
+    
+    Returns:
+        str: Hex-Farbcode
+    """
     return get_severity_color(priority)
 
 
 def get_risk_color(risk_level: str) -> str:
-    """Farbe für Risikostufen-Badge ermitteln (unterstützt Deutsch und Englisch)"""
+    """
+    Ermittelt die Farbe für einen Risikostufen-Badge.
+    
+    Risikostufen verwenden dieselbe Farbcodierung wie Schweregrad.
+    Unterstützt sowohl deutsche als auch englische Bezeichnungen.
+    
+    Args:
+        risk_level (str): Risikostufe auf Deutsch oder Englisch
+    
+    Returns:
+        str: Hex-Farbcode
+    """
     return get_severity_color(risk_level)
 
 
 def get_status_color(status: str) -> str:
-    """Farbe für Status-Badge ermitteln"""
+    """
+    Ermittelt die Farbe für einen Status-Badge.
+    
+    Status-Farben unterscheiden sich von Schweregrad-Farben:
+    - Abgeschlossen/Akzeptiert/Betriebsbereit: Grün (positiver Status)
+    - In Bearbeitung: Blau (aktiver Status)
+    - Ausstehend/Wartung: Bernstein/Gelb (wartend)
+    - Abgelehnt/Kritisch: Rot (negativer/kritischer Status)
+    
+    Args:
+        status (str): Status auf Deutsch oder Englisch
+    
+    Returns:
+        str: Hex-Farbcode
+    """
     farben = {
         # Deutsch
-        "ausstehend": "#F59E0B",      # bernstein-500
-        "in_bearbeitung": "#3B82F6",  # blau-500
-        "abgeschlossen": "#10B981",   # smaragd-500
-        "akzeptiert": "#10B981",      # smaragd-500
-        "abgelehnt": "#EF4444",       # rot-500
-        "betriebsbereit": "#10B981",  # smaragd-500
-        "wartung": "#F59E0B",         # bernstein-500
-        "kritisch": "#DC2626",        # rot-600
+        "ausstehend": "#F59E0B",      # bernstein-500 (wartend)
+        "in_bearbeitung": "#3B82F6",  # blau-500 (aktiv)
+        "abgeschlossen": "#10B981",   # smaragd-500 (erfolgreich)
+        "akzeptiert": "#10B981",      # smaragd-500 (erfolgreich)
+        "abgelehnt": "#EF4444",       # rot-500 (negativ)
+        "betriebsbereit": "#10B981",  # smaragd-500 (operativ)
+        "wartung": "#F59E0B",         # bernstein-500 (wartend)
+        "kritisch": "#DC2626",        # rot-600 (kritisch)
+        "geplant": "#F59E0B",         # bernstein-500 (geplant)
         # Englisch (Kompatibilität)
         "pending": "#F59E0B",
         "in_progress": "#3B82F6",
@@ -101,15 +362,40 @@ def get_status_color(status: str) -> str:
         "operational": "#10B981",
         "maintenance": "#F59E0B",
         "critical": "#DC2626",
+        "planned": "#F59E0B",         # bernstein-500 (geplant)
     }
-    return farben.get(status.lower(), "#6B7280")
+    return farben.get(status.lower(), "#6B7280")  # Standard: Grau
 
 
 def calculate_inventory_status(current: int, min_threshold: int, max_capacity: int) -> Dict:
-    """Berechne Lagerstatus und Prozentsatz"""
+    """
+    Berechnet den Inventarstatus basierend auf aktuellem Bestand, Mindest-Schwelle und maximaler Kapazität.
+    
+    Bestimmt ob der Bestand niedrig oder kritisch ist:
+    - Normal: >= Mindest-Schwelle
+    - Niedrig: < Mindest-Schwelle
+    - Kritisch: < 50% der Mindest-Schwelle
+    
+    Args:
+        current (int): Aktueller Bestand
+        min_threshold (int): Mindest-Schwelle (Nachbestellung empfohlen)
+        max_capacity (int): Maximale Kapazität (für Prozentsatz-Berechnung)
+    
+    Returns:
+        Dict: Dictionary mit:
+            - percentage: Auslastung in Prozent (0-100)
+            - is_low: Boolean ob Bestand niedrig ist
+            - is_critical: Boolean ob Bestand kritisch ist
+            - status: Status auf Deutsch ("normal", "niedrig", "kritisch")
+            - status_en: Status auf Englisch ("normal", "low", "critical")
+    """
+    # Berechne Auslastung in Prozent
     prozent = (current / max_capacity) * 100 if max_capacity > 0 else 0
+    
+    # Prüfe ob Bestand niedrig oder kritisch ist
     ist_niedrig = current < min_threshold
-    ist_kritisch = current < (min_threshold * 0.5)
+    ist_kritisch = current < (min_threshold * 0.5)  # Kritisch bei < 50% der Mindest-Schwelle
+    
     # Status sowohl auf Deutsch als auch Englisch für Kompatibilität
     if ist_kritisch:
         status = "kritisch"
@@ -120,6 +406,7 @@ def calculate_inventory_status(current: int, min_threshold: int, max_capacity: i
     else:
         status = "normal"
         status_en = "normal"
+    
     return {
         "percentage": round(prozent, 1),
         "is_low": ist_niedrig,
@@ -130,23 +417,50 @@ def calculate_inventory_status(current: int, min_threshold: int, max_capacity: i
 
 
 def calculate_capacity_status(utilization: float) -> Dict:
-    """Berechne Kapazitätsstatus"""
+    """
+    Berechnet den Kapazitätsstatus basierend auf Auslastung.
+    
+    Kategorisiert die Auslastung in verschiedene Stufen:
+    - Niedrig: < 50% (Grün)
+    - Moderat: 50-75% (Blau)
+    - Hoch: 75-90% (Bernstein/Gelb)
+    - Kritisch: >= 90% (Rot)
+    
+    Args:
+        utilization (float): Auslastung als Dezimalzahl (0.0-1.0) oder Prozentsatz (0-100)
+    
+    Returns:
+        Dict: Dictionary mit:
+            - status: Status auf Deutsch
+            - status_en: Status auf Englisch
+            - color: Hex-Farbcode für die Anzeige
+            - percentage: Auslastung in Prozent (0-100)
+    """
+    # Normalisiere utilization auf 0.0-1.0 falls nötig
+    if utilization > 1.0:
+        utilization = utilization / 100.0
+    
     if utilization >= 0.9:
+        # Kritisch: >= 90% Auslastung
         status = "kritisch"
         status_en = "critical"
-        color = "#DC2626"
+        color = "#DC2626"  # Rot
     elif utilization >= 0.75:
+        # Hoch: 75-90% Auslastung
         status = "hoch"
         status_en = "high"
-        color = "#F59E0B"
+        color = "#F59E0B"  # Bernstein
     elif utilization >= 0.5:
+        # Moderat: 50-75% Auslastung
         status = "moderat"
         status_en = "moderate"
-        color = "#3B82F6"
+        color = "#3B82F6"  # Blau
     else:
+        # Niedrig: < 50% Auslastung
         status = "niedrig"
         status_en = "low"
-        color = "#10B981"
+        color = "#10B981"  # Grün
+    
     return {
         "status": status,
         "status_en": status_en,
@@ -155,71 +469,157 @@ def calculate_capacity_status(utilization: float) -> Dict:
     }
 
 
-def generate_short_term_prediction(current_value: float, trend: str = "stable") -> Dict:
-    """Erzeuge 5-15 Minuten Prognosen"""
-    # Einfache Prognoselogik
-    if trend == "increasing":
-        multiplikator = 1.1
-    elif trend == "decreasing":
-        multiplikator = 0.9
-    else:
-        multiplikator = 1.0
-    
-    prognosen = []
-    for minuten in [5, 10, 15]:
-        prognosewert = current_value * (multiplikator ** (minuten / 10))
-        vertrauen = calculate_prediction_confidence(prognosewert, minuten)
-        prognosen.append({
-            "minuten": minuten,
-            "wert": round(prognosewert, 1),
-            "vertrauen": vertrauen
-        })
-    
-    return prognosen
-
-
 def format_duration_minutes(minutes: int) -> str:
-    """Formatiere Dauer in Minuten als lesbare Zeichenkette"""
+    """
+    Formatiert eine Dauer in Minuten als lesbare Zeichenkette.
+    
+    Beispiele:
+    - 30 → "30 Min."
+    - 90 → "1 Std. 30 Min."
+    - 120 → "2 Std."
+    
+    Args:
+        minutes (int): Dauer in Minuten
+    
+    Returns:
+        str: Formatierte Dauer (z.B. "30 Min.", "2 Std. 15 Min.")
+    """
     if minutes < 60:
+        # Weniger als 1 Stunde: nur Minuten
         return f"{minutes} Min."
     else:
+        # 1 Stunde oder mehr: Stunden und Minuten
         stunden = minutes // 60
         minuten = minutes % 60
         if minuten == 0:
+            # Ganzzahlige Stunden: nur Stunden anzeigen
             return f"{stunden} Std."
         return f"{stunden} Std. {minuten} Min."
 
 
+def get_department_name_mapping() -> Dict[str, str]:
+    """
+    Gibt das zentrale Mapping aller Abteilungen des Waldkrankenhauses Erlangen zurück.
+    
+    Mapping von Abteilungs-Codes (englisch) zu deutschen Vollnamen.
+    Dies ist die zentrale Quelle für alle Abteilungsnamen im System.
+    
+    Returns:
+        Dict[str, str]: Mapping von Abteilungs-Code zu deutschem Vollnamen
+    """
+    return {
+        # Waldkrankenhaus Erlangen - 9 Fachabteilungen + Notaufnahme
+        "ER": "Notaufnahme",
+        "ICU": "Klinik für Anästhesie und Intensivmedizin",
+        "Surgery": "Klinik für Allgemein- und Viszeralchirurgie",
+        "Cardiology": "Klinik für Kardiologie und Angiologie (Medizinische Klinik I)",
+        "Gastroenterology": "Klinik für Gastroenterologie und Onkologie (Medizinische Klinik II)",
+        "Geriatrics": "Klinik für Akutgeriatrie (Medizinische Klinik III / Geriatrie-Zentrum Erlangen)",
+        "Orthopedics": "Klinik für Orthopädie und Unfallchirurgie",
+        "Urology": "Klinik für Urologie",
+        "SpineCenter": "Interdisziplinäres Zentrum für Wirbelsäulen- und Skoliosetherapie",
+        "ENT": "Belegabteilung für Hals-, Nasen-, Ohrenheilkunde",
+        # Alte/alternative Bezeichnungen für Kompatibilität
+        "ED": "Notaufnahme",
+        "General Ward": "Allgemeinstation",
+        "Radiology": "Radiologie",
+        "Neurology": "Neurologie",
+        "Pediatrics": "Pädiatrie",
+        "Oncology": "Onkologie",
+        "Maternity": "Geburtshilfe",
+    }
+
+
+def get_department_display_name(dept_code: str) -> str:
+    """
+    Gibt den deutschen Anzeigenamen für eine Abteilung zurück.
+    
+    Args:
+        dept_code (str): Abteilungs-Code (z.B. "ER", "ICU", "Cardiology")
+    
+    Returns:
+        str: Deutscher Vollname der Abteilung, oder der Code selbst falls nicht gefunden
+    """
+    mapping = get_department_name_mapping()
+    return mapping.get(dept_code, dept_code)
+
+
 def get_department_color(department: str) -> str:
-    """Gibt eine konsistente Farbe für die Abteilung zurück"""
+    """
+    Gibt eine konsistente Farbe für eine Abteilung zurück.
+    
+    Jede Abteilung hat eine zugewiesene Farbe für die Visualisierung
+    in Diagrammen und Übersichten.
+    
+    Args:
+        department (str): Abteilungsname (auf Deutsch oder Englisch)
+    
+    Returns:
+        str: Hex-Farbcode für die Abteilung
+    """
     farben = {
-        "ER": "#EF4444",              # Notaufnahme
-        "ICU": "#DC2626",             # Intensivstation
-        "Surgery": "#3B82F6",         # Chirurgie
-        "Cardiology": "#8B5CF6",      # Kardiologie
-        "General Ward": "#10B981",    # Allgemeinstation
+        # Waldkrankenhaus Erlangen Abteilungen (Codes)
+        "ER": "#EF4444",              # Notaufnahme (Rot)
+        "ED": "#EF4444",              # Notaufnahme (Rot) - Alternative
+        "ICU": "#DC2626",             # Anästhesie und Intensivmedizin (Dunkelrot)
+        "Surgery": "#3B82F6",         # Allgemein- und Viszeralchirurgie (Blau)
+        "Cardiology": "#8B5CF6",      # Kardiologie (Lila)
+        "Orthopedics": "#F59E0B",     # Orthopädie und Unfallchirurgie (Bernstein)
+        "Urology": "#06B6D4",         # Urologie (Cyan)
+        "Gastroenterology": "#10B981", # Gastroenterologie (Grün)
+        "Geriatrics": "#84CC16",      # Akutgeriatrie (Lime)
+        "SpineCenter": "#6366F1",     # Wirbelsäulen- und Skoliosetherapie (Indigo)
+        "ENT": "#EC4899",             # Hals-, Nasen-, Ohrenheilkunde (Pink) - NEU
+        "General Ward": "#10B981",    # Allgemeinstation (Grün)
         # Deutsche Abteilungsnamen für Kompatibilität
         "Notaufnahme": "#EF4444",
-        "Intensivstation": "#DC2626",
-        "Chirurgie": "#3B82F6",
+        "Anästhesie und Intensivmedizin": "#DC2626",
+        "Intensivstation": "#DC2626",  # Alte Bezeichnung
+        "Allgemein- und Viszeralchirurgie": "#3B82F6",
+        "Chirurgie": "#3B82F6",        # Alte Bezeichnung
         "Kardiologie": "#8B5CF6",
+        "Klinik für Kardiologie und Angiologie (Medizinische Klinik I)": "#8B5CF6",
+        "Orthopädie und Unfallchirurgie": "#F59E0B",
+        "Orthopädie": "#F59E0B",       # Alte Bezeichnung
+        "Urologie": "#06B6D4",
+        "Gastroenterologie": "#10B981",
+        "Klinik für Gastroenterologie und Onkologie (Medizinische Klinik II)": "#10B981",
+        "Akutgeriatrie": "#84CC16",
+        "Klinik für Akutgeriatrie (Medizinische Klinik III / Geriatrie-Zentrum Erlangen)": "#84CC16",
+        "Wirbelsäulen- und Skoliosetherapie": "#6366F1",
+        "Interdisziplinäres Zentrum für Wirbelsäulen- und Skoliosetherapie": "#6366F1",
+        "Belegabteilung für Hals-, Nasen-, Ohrenheilkunde": "#EC4899",
+        "Hals-, Nasen-, Ohrenheilkunde": "#EC4899",
+        "HNO": "#EC4899",
         "Allgemeinstation": "#10B981",
     }
-    return farben.get(department, "#6B7280")
+    return farben.get(department, "#6B7280")  # Standard: Grau für unbekannte Abteilungen
 
 
 def get_max_usage_hours(device_type: str) -> int:
-    """Gibt die maximale Betriebsstunden für einen Gerätetyp zurück"""
+    """
+    Gibt die maximale Betriebsstunden für einen Gerätetyp zurück.
+    
+    Definiert nach wie vielen Betriebsstunden ein Gerät gewartet werden sollte.
+    Verschiedene Gerätetypen haben unterschiedliche Wartungsintervalle basierend
+    auf ihrer Komplexität und Nutzung.
+    
+    Args:
+        device_type (str): Gerätetyp (z.B. "Beatmungsgerät", "Monitor")
+    
+    Returns:
+        int: Maximale Betriebsstunden vor Wartung (Standard: 4000)
+    """
     max_hours_mapping = {
-        'Beatmungsgerät': 4200,
-        'Monitor': 6000,
-        'OP-Monitor': 6000,
-        'Defibrillator': 3000,
-        'CT-Gerät': 5000,
-        'MRT-Gerät': 5500,
-        'Röntgengerät': 4000,
-        'EKG-Gerät': 3000,
-        'Ultraschallgerät': 3500,
+        'Beatmungsgerät': 4200,      # Kritische Ausrüstung: häufige Wartung
+        'Monitor': 6000,              # Standard-Monitore: längere Intervalle
+        'OP-Monitor': 6000,           # OP-Monitore: ähnlich wie Standard
+        'Defibrillator': 3000,        # Kritische Ausrüstung: häufige Wartung
+        'CT-Gerät': 5000,             # Bildgebung: mittlere Intervalle
+        'MRT-Gerät': 5500,            # Bildgebung: mittlere Intervalle
+        'Röntgengerät': 4000,         # Bildgebung: häufigere Wartung
+        'EKG-Gerät': 3000,            # Diagnostik: häufigere Wartung
+        'Ultraschallgerät': 3500,     # Bildgebung: häufigere Wartung
     }
     return max_hours_mapping.get(device_type, 4000)  # Default: 4000 Stunden
 
@@ -961,12 +1361,23 @@ def calculate_reorder_suggestion(
     min_threshold = item.get('min_threshold', 0)
     max_capacity = item.get('max_capacity', 0)
     
+    # Prüfe zuerst, ob Artikel unter Mindestbestand liegt
+    is_below_threshold = current_stock < min_threshold
+    is_near_threshold = min_threshold > 0 and current_stock < min_threshold * 1.2  # Innerhalb 20% des Mindestbestands
+    
     # Bestimme Priorität
     if days_until_stockout is None:
-        priority = "niedrig"
-        suggested_qty = 0
-        order_by_days = None
-        reasoning = "Kein Engpass erwartet"
+        # Wenn unter Mindestbestand, auch ohne Engpass-Berechnung mindestens mittlere Priorität
+        if is_below_threshold:
+            priority = "mittel"
+            suggested_qty = max(min_threshold * 1.5, int(daily_consumption_rate * 14)) if daily_consumption_rate > 0 else min_threshold * 1.5
+            order_by_days = 3  # Bestelle innerhalb von 3 Tagen
+            reasoning = f"Unter Mindestbestand ({current_stock} < {min_threshold})"
+        else:
+            priority = "niedrig"
+            suggested_qty = 0
+            order_by_days = None
+            reasoning = "Kein Engpass erwartet"
     elif days_until_stockout <= safety_buffer_days + delivery_time_days:
         priority = "hoch"
         # Kritisch: Bestelle sofort, genug für mindestens 2x Mindestbestand
@@ -980,11 +1391,18 @@ def calculate_reorder_suggestion(
         order_by_days = max(0, int(days_until_stockout - safety_buffer_days - delivery_time_days))
         reasoning = f"Engpass in {days_until_stockout:.1f} Tagen erwartet"
     else:
-        priority = "niedrig"
-        # Planmäßige Bestellung
-        suggested_qty = max(min_threshold, int(daily_consumption_rate * 14))  # 2 Wochen Vorrat
-        order_by_days = max(0, int(days_until_stockout - safety_buffer_days - delivery_time_days))
-        reasoning = f"Planmäßige Bestellung empfohlen"
+        # Auch bei längerer Zeit bis Engpass: Wenn unter Mindestbestand, mindestens mittlere Priorität
+        if is_below_threshold or is_near_threshold:
+            priority = "mittel"
+            suggested_qty = max(min_threshold * 1.5, int(daily_consumption_rate * 14)) if daily_consumption_rate > 0 else min_threshold * 1.5
+            order_by_days = max(0, int(days_until_stockout - safety_buffer_days - delivery_time_days))
+            reasoning = f"Unter Mindestbestand, Engpass in {days_until_stockout:.1f} Tagen erwartet"
+        else:
+            priority = "niedrig"
+            # Planmäßige Bestellung
+            suggested_qty = max(min_threshold, int(daily_consumption_rate * 14)) if daily_consumption_rate > 0 else min_threshold
+            order_by_days = max(0, int(days_until_stockout - safety_buffer_days - delivery_time_days))
+            reasoning = f"Planmäßige Bestellung empfohlen"
     
     # Stelle sicher, dass nicht über max_capacity hinausgegangen wird
     if max_capacity > 0:

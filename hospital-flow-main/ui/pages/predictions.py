@@ -15,6 +15,11 @@ from utils import (
 from ui.components import render_badge, render_empty_state
 
 
+@st.cache_data(ttl=30)
+def _get_predictions_cached(_db, time_horizon_minutes):
+    """Gecachte Vorhersagen"""
+    return _db.get_predictions(time_horizon_minutes)
+
 def format_prediction_value(pred_type: str, value: float) -> tuple[str, str]:
     if pred_type == 'patient_arrival':
         return f"{int(value)}", "neue Patienten erwartet"
@@ -76,38 +81,46 @@ def render(db, sim, get_cached_alerts=None, get_cached_recommendations=None, get
     """Rendert die Vorhersagen-Seite"""
     st.markdown("### 5-15 Minuten Vorhersagen")
     
-    # Hole alle Vorhersagen
-    all_predictions = db.get_predictions(15)
+    # Hole alle Vorhersagen - verwende Background-Daten für sofortigen Zugriff
+    if 'background_data' in st.session_state and st.session_state.background_data:
+        all_predictions = st.session_state.background_data.get('predictions', [])
+    else:
+        all_predictions = _get_predictions_cached(db, 15)  # Fallback: Gecacht
     all_predictions = [p for p in all_predictions if p['prediction_type'] in ['patient_arrival', 'bed_demand'] and 5 <= p['time_horizon_minutes'] <= 15]
     
     predictions = []
     
     if all_predictions:
-        # Bereite Daten für Filter vor
-        dept_map = {
-            'Kardiologie': 'Kardiologie',
-            'Gastroenterologie': 'Gastroenterologie',
-            'Akutgeriatrie': 'Akutgeriatrie',
-            'Chirurgie': 'Chirurgie',
-            'Intensivstation': 'Intensivstation',
-            'Orthopädie': 'Orthopädie',
-            'Urologie': 'Urologie',
-            'Wirbelsäule': 'Wirbelsäule',
-            'HNO': 'HNO',
-            'Notaufnahme': 'Notaufnahme',
-            'ICU': 'Intensivstation',
-            'Surgery': 'Chirurgie',
-            'General Ward': 'Allgemeinstation',
-            'Cardiology': 'Kardiologie',
-            'Neurology': 'Neurologie',
-            'Pediatrics': 'Pädiatrie',
-            'Oncology': 'Onkologie',
+        # Bereite Daten für Filter vor - verwende zentrales Mapping
+        from utils import get_department_name_mapping
+        dept_map_base = get_department_name_mapping()
+        # Erstelle Reverse-Mapping (Deutsch -> Code) für Filter
+        dept_map = {}
+        for code, de_name in dept_map_base.items():
+            dept_map[de_name] = code
+            dept_map[code] = code  # Auch Code selbst als Key
+        # Erweitere für Kompatibilität
+        dept_map.update({
+            'Kardiologie': 'Cardiology',
+            'Gastroenterologie': 'Gastroenterology',
+            'Akutgeriatrie': 'Geriatrics',
+            'Chirurgie': 'Surgery',
+            'Intensivstation': 'ICU',
+            'Orthopädie': 'Orthopedics',
+            'Urologie': 'Urology',
+            'Wirbelsäule': 'SpineCenter',
+            'HNO': 'ENT',
+            'Notaufnahme': 'ER',
+            'General Ward': 'General Ward',
+            'Neurology': 'Neurology',
+            'Pediatrics': 'Pediatrics',
+            'Oncology': 'Oncology',
             'Orthopedics': 'Orthopädie',
             'Maternity': 'Geburtshilfe',
             'Radiology': 'Radiologie',
             'Other': 'Andere',
             'N/A': 'N/A'
-        }
+        })
         
         pred_type_map = {
             'patient_arrival': 'Patientenzugang',
