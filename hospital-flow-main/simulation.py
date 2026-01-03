@@ -408,6 +408,44 @@ class HospitalSimulation:
             self.db.create_alert_safe(now, 'high', f'Erhöhte Transport-Warteschlange ({transport_queue})', 'Logistics', 'transport_queue', transport_queue)
         elif transport_queue > 5:
             self.db.create_alert_safe(now, 'medium', f'Erhöhte Transport-Warteschlange ({transport_queue})', 'Logistics', 'transport_queue', transport_queue)
+        
+        # Staff Load Alert
+        staff_load = self.state.get('staff_load', 0)
+        if staff_load > 90:
+            self.db.create_alert_safe(now, 'high', f'Kritische Personalauslastung ({staff_load:.0f}%)', 'General', 'staff_load', staff_load)
+        elif staff_load > 80:
+            self.db.create_alert_safe(now, 'medium', f'Erhöhte Personalauslastung ({staff_load:.0f}%)', 'General', 'staff_load', staff_load)
+        
+        # Inventory Alerts
+        inventory_risk_count = self.state.get('inventory_risk_count', 0)
+        if inventory_risk_count > 0:
+            # Hole tatsächliche Inventar-Daten für detaillierte Warnungen
+            try:
+                inventory = self.db.get_inventory_status()
+                critical_items = [i for i in inventory if i.get('current_stock', 0) < i.get('min_threshold', 0)]
+                
+                if len(critical_items) >= 3:
+                    # Kritisch: 3 oder mehr Artikel unter Mindestbestand
+                    item_names = [item.get('item_name', 'Unbekannt') for item in critical_items[:3]]
+                    items_str = ', '.join(item_names)
+                    if len(critical_items) > 3:
+                        items_str += f" und {len(critical_items) - 3} weitere"
+                    self.db.create_alert_safe(now, 'high', f'Kritischer Inventar-Engpass: {items_str}', 
+                                             critical_items[0].get('department', 'N/A'), 'inventory', len(critical_items))
+                elif len(critical_items) >= 1:
+                    # Warnung: 1-2 Artikel unter Mindestbestand
+                    item_name = critical_items[0].get('item_name', 'Unbekannt')
+                    dept = critical_items[0].get('department', 'N/A')
+                    self.db.create_alert_safe(now, 'medium', f'Inventar-Engpass: {item_name} unter Mindestbestand', 
+                                             dept, 'inventory', len(critical_items))
+            except Exception:
+                # Fallback: Verwende inventory_risk_count wenn DB-Zugriff fehlschlägt
+                if inventory_risk_count >= 3:
+                    self.db.create_alert_safe(now, 'high', f'Kritischer Inventar-Engpass ({inventory_risk_count} Artikel)', 
+                                             'N/A', 'inventory', inventory_risk_count)
+                elif inventory_risk_count >= 1:
+                    self.db.create_alert_safe(now, 'medium', f'Inventar-Engpass ({inventory_risk_count} Artikel)', 
+                                             'N/A', 'inventory', inventory_risk_count)
     
     def _update_history(self):
         """Aktualisiert Metrik-Historie (für Vorhersagen)"""

@@ -33,54 +33,65 @@ class PredictionEngine:
         Returns:
             Dict mit predicted_value, confidence, etc.
         """
-        # Hole historische Daten
+        # Hole historische ED Load Daten (besserer Indikator für Patientenzugang)
         history = self.db.get_metrics_last_n_minutes(60)
-        patient_history = [m for m in history if m['metric_type'] == 'waiting_count']
+        ed_load_history = [m for m in history if m['metric_type'] == 'ed_load']
         
-        # Basis-Vorhersage mit Moving Average
-        if len(patient_history) >= 3:
-            recent_values = [m['value'] for m in patient_history[-12:]]  # Letzte 12 Einträge (1 Stunde)
-            moving_avg = np.mean(recent_values)
+        # Basis-Vorhersage basierend auf ED Load Trend
+        if len(ed_load_history) >= 3:
+            recent_ed_loads = [m['value'] for m in ed_load_history[-12:]]  # Letzte 12 Einträge (1 Stunde)
+            current_ed_load = recent_ed_loads[-1] if recent_ed_loads else 65.0
             
-            # Trend-Berechnung
-            if len(recent_values) >= 2:
-                trend = (recent_values[-1] - recent_values[0]) / len(recent_values)
+            # Berechne Trend der ED Load (steigende Load = mehr Patienten)
+            if len(recent_ed_loads) >= 2:
+                ed_trend = (recent_ed_loads[-1] - recent_ed_loads[0]) / len(recent_ed_loads)
             else:
-                trend = 0
+                ed_trend = 0
+            
+            # Konvertiere ED Load Trend zu erwarteten Patientenzugängen
+            # Annahme: ED Load von 50% = ~3 Patienten/5min, 75% = ~6 Patienten/5min, 100% = ~10 Patienten/5min
+            # Formel: Patienten pro 5min ≈ (ED_Load / 10) * 0.6
+            base_patients_per_5min = (current_ed_load / 10) * 0.6
+            
+            # Trend-Korrektur: Wenn ED Load steigt, erwarten wir mehr Patienten
+            trend_adjustment = (ed_trend / 10) * 0.3  # Anpassung basierend auf Trend
             
             # Tageszeit-Faktor
             now = datetime.now(timezone.utc)
             hour = now.hour
             if 8 <= hour <= 12:
-                time_factor = 1.3
+                time_factor = 1.3  # Morgen-Spitze
             elif 14 <= hour <= 18:
-                time_factor = 1.2
+                time_factor = 1.2  # Nachmittag
             elif 22 <= hour or hour < 6:
-                time_factor = 0.6
+                time_factor = 0.6  # Nacht
             else:
-                time_factor = 0.9
+                time_factor = 0.9  # Standard
             
             # Wochentags-Faktor
             weekday = now.weekday()
-            weekday_factor = 0.85 if weekday >= 5 else 1.0
+            weekday_factor = 0.85 if weekday >= 5 else 1.0  # Wochenende weniger
             
-            # Vorhergesagter Wert
-            base_prediction = moving_avg + (trend * (time_horizon_minutes / 5))
-            predicted_value = base_prediction * time_factor * weekday_factor
+            # Vorhergesagter Wert für den Zeithorizont
+            # Skaliere von 5-Minuten-Basis auf gewünschten Zeithorizont
+            time_scale = time_horizon_minutes / 5.0
+            base_prediction = base_patients_per_5min * time_scale
+            trend_effect = trend_adjustment * time_scale
+            predicted_value = (base_prediction + trend_effect) * time_factor * weekday_factor
             
             # Konfidenz basierend auf Datenqualität
-            confidence = min(0.95, 0.6 + (len(patient_history) / 20) * 0.35)
+            confidence = min(0.95, 0.6 + (len(ed_load_history) / 20) * 0.35)
             
             # Anpassung für Zeithorizont (länger = weniger Konfidenz)
             confidence *= (1 - (time_horizon_minutes / 60) * 0.2)
         else:
-            # Fallback ohne Historie
-            predicted_value = 5.0
+            # Fallback ohne Historie - konservative Schätzung
+            predicted_value = 3.0 * (time_horizon_minutes / 5.0)
             confidence = 0.5
         
         return {
             'prediction_type': 'patient_arrival',
-            'predicted_value': max(0, int(predicted_value)),
+            'predicted_value': max(0, int(round(predicted_value))),
             'confidence': max(0.3, confidence),
             'time_horizon_minutes': time_horizon_minutes,
             'department': department,
@@ -112,42 +123,61 @@ class PredictionEngine:
                 'model_version': 'v1.0-statistical'
             }
         
+        total_beds = dept_capacity.get('total_beds', 20)
         current_utilization = dept_capacity.get('utilization_percent', 75.0)
         
-        # Hole historische Metriken
+        # Hole historische Metriken für Betten
         history = self.db.get_metrics_last_n_minutes(120)  # 2 Stunden
         bed_history = [m for m in history if m['metric_type'] == 'beds_free']
         
-        # Berechne Trend
+        # Berechne Trend basierend auf aktueller Auslastung und historischen Daten
         if len(bed_history) >= 3:
             recent_beds = [m['value'] for m in bed_history[-24:]]  # Letzte 24 Einträge
-            bed_trend = (recent_beds[-1] - recent_beds[0]) / len(recent_beds) if len(recent_beds) > 1 else 0
-            
-            # Konvertiere zu Auslastung
-            total_beds = dept_capacity.get('total_beds', 20)
-            current_free = recent_beds[-1] if recent_beds else total_beds * 0.25
+            current_free = recent_beds[-1] if recent_beds else total_beds * (1 - current_utilization / 100)
             current_occupied = total_beds - current_free
             
+            # Berechne Trend: Wie ändert sich die Anzahl freier Betten?
+            # Positiver Trend = mehr Betten werden frei, negativer = mehr werden belegt
+            if len(recent_beds) >= 2:
+                # Trend pro Eintrag (ca. 5 Minuten pro Eintrag)
+                beds_trend_per_entry = (recent_beds[-1] - recent_beds[0]) / max(1, len(recent_beds) - 1)
+                # Skaliere auf Stunden (12 Einträge pro Stunde bei 5-Min-Intervallen)
+                beds_trend_per_hour = beds_trend_per_entry * 12
+            else:
+                beds_trend_per_hour = 0
+            
             # Vorhersage: Wie viele Betten werden in X Minuten belegt sein?
-            # Annahme: Aktueller Trend setzt sich fort
-            minutes_factor = time_horizon_minutes / 60  # Stunden
-            predicted_occupied = current_occupied + (bed_trend * minutes_factor * -1)  # Negativ weil weniger frei = mehr belegt
+            # Wenn Trend negativ (weniger frei), werden mehr Betten belegt
+            hours_ahead = time_horizon_minutes / 60.0
+            predicted_free_change = beds_trend_per_hour * hours_ahead
+            predicted_free = max(0, min(total_beds, current_free + predicted_free_change))
+            predicted_occupied = total_beds - predicted_free
             predicted_utilization = (predicted_occupied / total_beds) * 100 if total_beds > 0 else current_utilization
             
             # Begrenze auf realistische Werte
-            predicted_utilization = max(10, min(98, predicted_utilization))
+            predicted_utilization = max(5, min(98, predicted_utilization))
             
-            # Konfidenz
+            # Konfidenz basierend auf Datenqualität und Zeithorizont
             confidence = min(0.9, 0.5 + (len(bed_history) / 30) * 0.4)
             confidence *= (1 - (time_horizon_minutes / 120) * 0.15)  # Länger = weniger Konfidenz
         else:
-            # Fallback
-            predicted_utilization = current_utilization
+            # Fallback: Verwende aktuelle Auslastung mit kleiner Anpassung basierend auf ED Load
+            # Wenn ED Load hoch ist, erwarten wir mehr Bettenbedarf
+            ed_load_history = [m for m in history if m['metric_type'] == 'ed_load']
+            if ed_load_history:
+                current_ed_load = ed_load_history[-1]['value']
+                # ED Load beeinflusst Bettenbedarf mit Verzögerung
+                ed_impact = (current_ed_load - 65) * 0.15  # 65% ist Normal
+                predicted_utilization = current_utilization + ed_impact
+            else:
+                predicted_utilization = current_utilization
+            
+            predicted_utilization = max(5, min(98, predicted_utilization))
             confidence = 0.5
         
         return {
             'prediction_type': 'bed_demand',
-            'predicted_value': predicted_utilization,
+            'predicted_value': round(predicted_utilization, 1),
             'confidence': max(0.3, confidence),
             'time_horizon_minutes': time_horizon_minutes,
             'department': department,

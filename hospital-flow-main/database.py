@@ -4094,7 +4094,8 @@ class HospitalDB:
                     'transport_queue': 'transport',
                     'staff_load': 'staffing',
                     'or_load': 'capacity',
-                    'rooms_free': 'capacity'
+                    'rooms_free': 'capacity',
+                    'inventory': 'inventory'
                 }
                 alert_type = alert_type_map.get(metric_type, 'general')
                 
@@ -4380,15 +4381,6 @@ class HospitalDB:
                         except (sqlite3.DatabaseError, IndexError, TypeError):
                             continue
                     result['alerts'] = alerts_result
-                    # #region agent log
-                    import json
-                    import os
-                    log_path = '/Users/erwan/Programmieren/ItManagementV3/hospital-flow-main/.cursor/debug.log'
-                    try:
-                        with open(log_path, 'a') as f:
-                            f.write(json.dumps({"sessionId": "debug-session", "runId": "batch-query", "hypothesisId": "A", "location": "database.py:4382", "message": "get_dashboard_data_batch - alerts", "data": {"alert_count": len(alerts_result), "sample_ids": [r.get('id') for r in alerts_result[:3]]}, "timestamp": int(time.time() * 1000)}) + '\n')
-                    except: pass
-                    # #endregion
                 except sqlite3.DatabaseError:
                     result['alerts'] = []
                 except Exception:

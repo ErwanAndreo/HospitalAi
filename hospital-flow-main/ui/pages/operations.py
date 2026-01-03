@@ -4,7 +4,6 @@ Seitenmodul für Betrieb
 import streamlit as st
 from datetime import datetime, timedelta, timezone
 import pandas as pd
-import time
 from utils import (
     format_time_ago, get_severity_color, get_priority_color, get_risk_color,
     get_status_color, calculate_inventory_status, calculate_capacity_status,
