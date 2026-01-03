@@ -1,14 +1,19 @@
 [theme]
-primaryColor = "#667eea"
-backgroundColor = "#f8fafc"
-secondaryBackgroundColor = "#ffffff"
-textColor = "#1f2937"
+primaryColor = "#4f46e5"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f3f4f6"
+textColor = "#111827"
 font = "sans serif"
 
 [server]
 headless = true
-fileWatcherType = "auto"  # Automatisches File Watching für Hot Reload
+port = 8501
+enableCORS = false
+enableXsrfProtection = true
 
-[runner]
-fastReruns = true  # Schnellere Neuladung bei Code-Änderungen
+[browser]
+gatherUsageStats = false
 
+[ui]
+hideTopBar = false
+hideSidebarNav = false

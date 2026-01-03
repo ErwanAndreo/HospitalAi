@@ -1281,6 +1281,15 @@ class HospitalDB:
                     
                     result.append(row_dict)
                 
+                # #region agent log
+                import json
+                import os
+                log_path = '/Users/erwan/Programmieren/ItManagementV3/hospital-flow-main/.cursor/debug.log'
+                try:
+                    with open(log_path, 'a') as f:
+                        f.write(json.dumps({"sessionId": "debug-session", "runId": "db-query", "hypothesisId": "B", "location": "database.py:1284", "message": "get_active_alerts returning", "data": {"result_count": len(result), "sample_ids": [r.get('id') for r in result[:3]], "sample_messages": [r.get('message', '')[:30] for r in result[:2]]}, "timestamp": int(time.time() * 1000)}) + '\n')
+                except: pass
+                # #endregion
                 return result
             finally:
                 conn.close()
@@ -4380,6 +4389,15 @@ class HospitalDB:
                         except (sqlite3.DatabaseError, IndexError, TypeError):
                             continue
                     result['alerts'] = alerts_result
+                    # #region agent log
+                    import json
+                    import os
+                    log_path = '/Users/erwan/Programmieren/ItManagementV3/hospital-flow-main/.cursor/debug.log'
+                    try:
+                        with open(log_path, 'a') as f:
+                            f.write(json.dumps({"sessionId": "debug-session", "runId": "batch-query", "hypothesisId": "A", "location": "database.py:4382", "message": "get_dashboard_data_batch - alerts", "data": {"alert_count": len(alerts_result), "sample_ids": [r.get('id') for r in alerts_result[:3]]}, "timestamp": int(time.time() * 1000)}) + '\n')
+                    except: pass
+                    # #endregion
                 except sqlite3.DatabaseError:
                     result['alerts'] = []
                 except Exception:
@@ -4424,7 +4442,10 @@ class HospitalDB:
                 # Transport
                 try:
                     cursor.execute("""
-                        SELECT id, timestamp, from_location, to_location, priority, status, request_type, estimated_time_minutes, actual_time_minutes, start_time, expected_completion_time, delay_minutes
+                        SELECT id, timestamp, from_location, to_location, priority, status, request_type,
+                               estimated_time_minutes, actual_time_minutes, start_time, expected_completion_time,
+                               delay_minutes, related_entity_type, related_entity_id, planned_start_time,
+                               requested_time_start, requested_time_end
                         FROM transport_requests
                         ORDER BY timestamp DESC
                     """)
@@ -4441,7 +4462,12 @@ class HospitalDB:
                         'actual_time_minutes': row[8],
                         'start_time': row[9],
                         'expected_completion_time': row[10],
-                        'delay_minutes': row[11]
+                        'delay_minutes': row[11],
+                        'related_entity_type': row[12],
+                        'related_entity_id': row[13],
+                        'planned_start_time': row[14],
+                        'requested_time_start': row[15] if len(row) > 15 else None,
+                        'requested_time_end': row[16] if len(row) > 16 else None
                     } for row in rows]
                 except Exception:
                     pass
